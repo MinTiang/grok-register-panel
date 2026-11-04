@@ -144,7 +144,29 @@ curl -H "Authorization: Bearer $MONITOR_TOKEN" http://目标地址:8787/api/stat
 
 第二条状态接口在未带 Token 时应返回 `401`。
 
-## 6. 运行任务
+## 6. Docker Compose 部署
+
+不想维护 Python 环境时，可以直接使用官方多架构镜像（`linux/amd64` + `linux/arm64`）。
+镜像由 GitHub Actions 在推送 `v*` 标签时自动构建并发布到 GHCR，内置 Camoufox
+浏览器、Xvfb、Playwright 系统依赖，无需再执行 `camoufox fetch`。
+
+```bash
+git clone https://github.com/lij768423-svg/grok-register-panel.git
+cd grok-register-panel
+# 编辑 docker-compose.yaml：把 MONITOR_TOKEN 改成强随机串（唯一必改项）
+docker compose up -d
+```
+
+要点：
+
+- **无需 `.env`**：所有配置集中在 `docker-compose.yaml` 的 `environment` 段，均有默认值；镜像 tag 用 `latest` 跟随最新发布，生产建议固定到具体 `v*` 版本。
+- **数据持久化**：唯一挂载点 `./data:/app/data`。`config.json`、`accounts/`、`cpa_auth/`、`grok2api_auth/`、`log/` 等运行数据都落在这里；首次启动自动生成 `./data/config.json`（示例配置），编辑后 `docker compose restart` 生效。
+- **令牌必填**：容器内面板绑定 `0.0.0.0`，应用规定非回环绑定必须配置 `MONITOR_TOKEN`，否则容器启动即退出。
+- **代理仍在面板配置**：注册出口代理不走容器网络，在面板「代理池」导入家宽/住宅代理，或编辑 `./data/config.json` 的 `proxy` 字段；保持一个账号全程固定一个代理。
+- **升级**：`docker compose pull && docker compose up -d`；数据在 `./data/`，升级不丢。
+- **安全**：不要把 8787 端口直接暴露公网，建议放在有 TLS 与额外认证的反代后面，或只绑定 Tailscale/LAN 地址（`ports` 改成 `"127.0.0.1:8787:8787"` 之类）。
+
+## 7. 运行任务
 
 从面板启动时会按上述平台规则自动选择 Xvfb。直接执行单批时：
 
@@ -187,7 +209,7 @@ owner-only 的 `log/batch_traffic_history.json`（最多 500 批），面板据�
 `GROK_SLOT_RETRIES`、`GROK_BATCH_MAX_RESTARTS` 和
 `GROK_ORCH_MAX_CONSECUTIVE_FAILURES`。
 
-## 7. 账号补录
+## 8. 账号补录
 
 面板的“账号补录”支持：
 
@@ -206,7 +228,7 @@ owner-only 的 `log/batch_traffic_history.json`（最多 500 批），面板据�
   --report-json log/recovery_report.json
 ```
 
-## 8. 安全边界
+## 9. 安全边界
 
 - `/api/health` 和静态页面可匿名访问；运行数据 API 在配置 Token 后要求鉴权。
 - 不要通过公网裸露内置 HTTP 服务。公网访问应放在有 TLS 和额外身份认证的反向代理后。

@@ -1,0 +1,54 @@
+# =============================================================================
+# Grok Register + Live Panel — Docker Compose 部署
+#
+# 镜像由 GitHub Actions 在推送 v* 标签时自动构建,发布到 GHCR
+# (linux/amd64 + linux/arm64 双架构,docker 会自动拉取与本机匹配的架构)。
+#
+# 不需要 .env 文件:所有配置都集中在本文件 environment 段,均有默认值。
+#
+# 使用步骤:
+#   1. 把 MONITOR_TOKEN 改成强随机串(唯一必改项)
+#      生成方式:python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+#   2. docker compose up -d
+#   3. 浏览器打开 http://<主机>:8787,输入上面设置的令牌
+#
+# 数据持久化:config.json、账号、CPA/Grok2API auth、日志全部保存在宿主机
+# ./data/ 目录,升级镜像不丢数据。首次启动会自动生成 ./data/config.json
+# (示例配置),编辑后 `docker compose restart` 生效。
+#
+# 代理:注册出口代理不走容器网络,直接在面板「代理池」里导入家宽/住宅代理
+# (或编辑 ./data/config.json 的 proxy 字段),保持一个账号全程固定一个代理。
+# =============================================================================
+
+services:
+  panel:
+    # GHCR 官方镜像;latest 跟随最新发布版,生产环境建议固定到具体 v* 版本,
+    # 例如 ghcr.io/mintiang/grok-register-panel:v0.7.0
+    image: ghcr.io/mintiang/grok-register-panel:latest
+    container_name: grok-register-panel
+    restart: unless-stopped
+    ports:
+      # 宿主机端口:容器端口。修改 MONITOR_PORT 时需同步修改这里
+      - "8787:8787"
+    environment:
+      # ── 唯一必改项 ──────────────────────────────────────────────────────
+      # 面板访问令牌:UI 登录与所有启动/停止等写操作都要用它。
+      # 容器绑定 0.0.0.0,应用规定非回环绑定必须配置令牌,否则容器拒绝启动。
+      MONITOR_TOKEN: "change-me-to-a-long-random-token"
+
+      # ── 以下保持默认即可 ────────────────────────────────────────────────
+      # 容器内监听地址/端口;镜像已默认 0.0.0.0:8787,列在这里便于按需修改
+      MONITOR_HOST: "0.0.0.0"
+      MONITOR_PORT: "8787"
+      # 面板原始日志尾部开关:1=可在面板查看原始日志尾部(可能含敏感运行信息);
+      # 默认 0,更安全
+      PANEL_INCLUDE_TAIL: "0"
+      # 无显示环境自动通过 xvfb-run 启动浏览器批次;镜像已内置 Xvfb,保持 auto
+      GROK_USE_XVFB: "auto"
+      # 容器时区(面板内部固定按北京时间展示,此值主要影响容器日志时间戳)
+      TZ: "Asia/Shanghai"
+      # 可选:CPA auth 输出目录;默认 /app/cpa_auth,已持久化到 ./data/cpa_auth/
+      # CPA_AUTH_DIR: "/app/cpa_auth"
+    volumes:
+      # 唯一数据挂载点:首次启动自动创建 ./data 及其子目录
+      - ./data:/app/data

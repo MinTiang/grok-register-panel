@@ -1,0 +1,30 @@
+# 版本控制与本地环境
+.git
+.gitignore
+.hallmark
+.venv
+venv
+
+# 文档、站点与测试(镜像运行不需要)
+docs
+tests
+.github
+deploy
+design-qa.md
+
+# 本地运行时数据:严禁打进镜像(凭据、账号、日志)
+config.json
+.env*
+accounts
+cpa_auth
+grok2api_auth
+log
+keys
+auth_out
+.browser-profiles
+proxies*.txt
+stickies*.txt
+
+# Python 缓存
+__pycache__
+*.py[cod]

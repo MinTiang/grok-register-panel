@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-05
+
+### Added
+
+- 新增 Docker 部署方案：`Dockerfile`（内置 Camoufox 浏览器、Xvfb 与 Playwright 系统依赖，支持 `linux/amd64` + `linux/arm64`）、`docker-compose.yaml`（配置全部集中在 environment 段，带默认值与注释，无需 `.env`）和 `docker/entrypoint.sh`（运行数据统一持久化到宿主机 `./data/`，`config.json` 首启自动初始化）。
+- 新增 GitHub Actions「Build Docker Image」：推送 `v*` 标签时自动构建多架构镜像并发布到 GHCR；amd64 / arm64 两个 job 并行构建，由 merge job 合并 manifest 并打 `vx.y.z` / `x.y.z` / `x.y` / `latest` 标签。
+- 新增 `tests/test_docker_deploy.py`，校验 Docker 相关资产结构与旧 workflow 清理状态。
+
+### Removed
+
+- 移除旧 CI workflow 与 Star History 自更新图表：删除 `ci.yml`、`update-star-history.yml`、`scripts/update_star_history.py`、`tests/test_star_history.py`、`docs/star-history-*.svg` 及 README Star History 章节。
+
 ## 0.6.1 - 2026-10-25
 
 ### Fixed

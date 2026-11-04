@@ -114,7 +114,7 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 |------|----------|----------------|
 | Linux | 正式支持 | 有显示会话时直启；无显示时面板自动调用 `xvfb-run` |
 | macOS | 正式支持 | 直接使用本机显示会话，不依赖 Xvfb |
-| Windows | 已本机验证，CI 覆盖 Node/Xvfb 解析 | 不依赖 Xvfb；面板直启 `.venv\Scripts\python.exe`。默认 `GROK_HEADLESS=1`（有头模式设 `GROK_HEADED=1`） |
+| Windows | 已本机验证 | 不依赖 Xvfb；面板直启 `.venv\Scripts\python.exe`。默认 `GROK_HEADLESS=1`（有头模式设 `GROK_HEADED=1`） |
 
 Linux 容器必须保留 procfs（通常为默认的 `/proc` 挂载），面板依赖它读取并安全停止
 当前项目的任务进程。
@@ -148,6 +148,22 @@ powershell -ExecutionPolicy Bypass -File scripts\run_windows_panel.ps1
 Windows 不要把 `PLAYWRIGHT_NODEJS_PATH` 指到 `scripts/playwright-node`（那是 bash 包装）。运行时会解析 `node.exe` 或 Playwright 自带 Node，并用带引号的 `NODE_OPTIONS --require` 注入 EPIPE 保护。代理请写 **Windows 本机可达** 的 URL（例如 `socks5://user:pass@gate.example:1000`），不要沿用 Linux 上的 `127.0.0.1:82xx` mixed 口。
 
 > `pip install` 只装 Python 依赖；**不执行 `camoufox fetch` 无法启动浏览器**。
+
+### Docker Compose 部署
+
+不想装 Python 环境时，可以直接用官方构建的多架构镜像（`linux/amd64` + `linux/arm64`，由 GitHub Actions 在推送 `v*` 标签时自动构建）：
+
+```bash
+git clone https://github.com/lij768423-svg/grok-register-panel.git
+cd grok-register-panel
+# 编辑 docker-compose.yaml：把 MONITOR_TOKEN 改成强随机串，镜像 tag 改成最新 v* 版本
+docker compose up -d
+# 首次启动会在 ./data/config.json 生成示例配置，编辑后重启容器生效
+```
+
+浏览器引擎（Camoufox）、Xvfb、Playwright 依赖都已内置在镜像里，无需再执行
+`camoufox fetch`。所有持久化数据（`config.json`、账号、CPA/Grok2API auth、日志）
+都落在宿主机 `./data/` 目录。完整说明见 [DEPLOYMENT.md](DEPLOYMENT.md) 的 Docker 章节。
 
 ### 配置（`config.json`）
 
@@ -588,17 +604,6 @@ A: 在控制台使用“账号补录”。待处理模式成功后自动出队�
 | 路径 | `run_batch_headless` / blacklist 使用包相对 ROOT，无硬编码机器路径 |
 | 稳定性 | `from __future__` 置顶；`Path` 先于 `chdir`；workers DOM id 拆分 |
 | 结果流 | `register_results.jsonl` 仅 JSON 行 |
-
-## Star History
-
-<a href="https://github.com/lij768423-svg/grok-register-panel/stargazers">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/star-history-dark.svg">
-    <img alt="Grok Register Panel GitHub Star 增长趋势" src="docs/star-history-light.svg">
-  </picture>
-</a>
-
-图表根据 GitHub Stargazer 时间戳生成，由 GitHub Actions 每日更新，不依赖第三方绘图接口。
 
 ## 相关项目
 
