@@ -77,11 +77,14 @@ def test_push_sso_end_to_end():
     assert login_call["url"].endswith("/api/admin/v1/auth/login")
     assert import_call["url"].endswith("/api/admin/v1/accounts/web/import")
     assert import_call["headers"]["Authorization"] == "Bearer eyJlogin.jwt.token"
-    files = import_call["kwargs"]["files"]
-    assert list(files) == ["files"]
-    filename, payload, ctype = files["files"]
-    assert filename.endswith(".json") and ctype == "application/json"
-    doc = __import__("json").loads(payload.decode("utf-8"))
+    ctype = import_call["headers"]["Content-Type"]
+    assert ctype.startswith("multipart/form-data; boundary=")
+    boundary = ctype.split("boundary=", 1)[1]
+    body = import_call["kwargs"]["data"]
+    assert f'name="files"; filename="grok-web-sso.json"'.encode() in body
+    import json as _json
+    part = body.split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n--", 1)[0]
+    doc = _json.loads(part.decode("utf-8"))
     assert doc["provider"] == "grok_web"
     assert doc["accounts"][0]["sso_token"] == "eyJabc.def.ghi"
 

@@ -140,20 +140,36 @@ def push_sso(
     返回 {ok, created, updated, skipped, failed, message}；网络/认证异常抛
     Grok2ApiPushError（调用方决定是否重试/记日志）。
     """
-    import requests as curl_requests  # curl_cffi.requests（impersonate 用）
+    import uuid
 
     base = normalize_base(base_url)
     document = build_import_document(email, sso_token)
     token = login(http_post, base, username, password, proxy=proxy, timeout=timeout)
-    proxies = {"http": proxy, "https": proxy} if proxy else None
     filename = "grok-web-sso.json"
     payload = json.dumps(document, ensure_ascii=False).encode("utf-8")
+    # 手工构造 multipart/form-data：requests 与 curl_cffi 的上传参数名不同
+    # （files= / multipart=），标准编码对两者都兼容
+    boundary = "----grokpanel" + uuid.uuid4().hex
+    body = b"".join(
+        [
+            (
+                f"--{boundary}\r\n"
+                f"Content-Disposition: form-data; name=\"files\"; filename=\"{filename}\"\r\n"
+                "Content-Type: application/json\r\n\r\n"
+            ).encode("utf-8"),
+            payload,
+            f"\r\n--{boundary}--\r\n".encode("utf-8"),
+        ]
+    )
     resp = http_post(
         f"{base}/api/admin/v1/accounts/web/import",
-        headers={"Authorization": f"Bearer {token}"},
-        files={"files": (filename, payload, "application/json")},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        data=body,
         timeout=timeout,
-        proxies=proxies,
+        proxies={"http": proxy, "https": proxy} if proxy else None,
         impersonate="chrome",
     )
     if resp.status_code in (401, 403):
