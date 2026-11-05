@@ -15,9 +15,13 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
+import uuid
 from typing import Any, Dict, Optional
 
 DEFAULT_TIMEOUT = 30
+_TOKEN_TTL_SECONDS = 14 * 60  # accessToken 有效期 15 分钟，提前 1 分钟复用
 
 
 class Grok2ApiPushError(RuntimeError):
@@ -64,27 +68,76 @@ def login(http_post: Any, base_url: str, username: str, password: str, *, proxy:
     pwd = str(password or "")
     if not user or not pwd:
         raise Grok2ApiPushError("grok2api_push_username / password 未配置")
+    token = _cached_token(base, user, pwd)
+    if token:
+        return token
     proxies = {"http": proxy, "https": proxy} if proxy else None
-    resp = http_post(
-        f"{base}/api/admin/v1/auth/login",
-        headers={"Content-Type": "application/json"},
-        data=json.dumps({"username": user, "password": pwd}).encode("utf-8"),
-        timeout=timeout,
-        proxies=proxies,
-        impersonate="chrome",
-    )
-    if resp.status_code in (401, 403):
-        raise Grok2ApiPushError(f"grok2api 管理登录被拒 HTTP {resp.status_code}")
-    if resp.status_code >= 400:
-        raise Grok2ApiPushError(f"grok2api 管理登录失败 HTTP {resp.status_code}")
-    try:
-        body = resp.json()
-    except Exception as exc:
-        raise Grok2ApiPushError(f"grok2api 登录响应无法解析: {_redact(exc)}") from exc
-    token = str(((body.get("data") or {}).get("tokens") or {}).get("accessToken") or "")
-    if not token:
-        raise Grok2ApiPushError("grok2api 登录响应缺少 accessToken")
-    return token
+    last_error = ""
+    for attempt in range(3):
+        try:
+            resp = http_post(
+                f"{base}/api/admin/v1/auth/login",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({"username": user, "password": pwd}).encode("utf-8"),
+                timeout=timeout,
+                proxies=proxies,
+                impersonate="chrome",
+            )
+        except Exception as exc:
+            last_error = f"grok2api 管理登录请求失败: {_redact(exc)}"
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise Grok2ApiPushError(last_error) from exc
+        if resp.status_code in (401, 403):
+            raise Grok2ApiPushError(f"grok2api 管理登录被拒 HTTP {resp.status_code}")
+        if resp.status_code >= 500 and attempt < 2:
+            last_error = f"grok2api 管理登录 HTTP {resp.status_code}"
+            time.sleep(2 * (attempt + 1))
+            continue
+        if resp.status_code >= 400:
+            raise Grok2ApiPushError(f"grok2api 管理登录失败 HTTP {resp.status_code}")
+        try:
+            body = resp.json()
+        except Exception as exc:
+            raise Grok2ApiPushError(f"grok2api 登录响应无法解析: {_redact(exc)}") from exc
+        token = str(((body.get("data") or {}).get("tokens") or {}).get("accessToken") or "")
+        if not token:
+            raise Grok2ApiPushError("grok2api 登录响应缺少 accessToken")
+        _store_token(base, user, pwd, token)
+        return token
+    raise Grok2ApiPushError(last_error or "grok2api 管理登录失败")
+
+
+# accessToken（15 分钟有效）跨号复用：同一批次多个成功号共享一次登录
+_TOKEN_CACHE_LOCK = threading.Lock()
+_TOKEN_CACHE: Dict[str, Any] = {"key": "", "token": "", "expires": 0.0}
+
+
+def _token_cache_key(base: str, user: str, pwd: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256(f"{base}|{user}|{pwd}".encode("utf-8")).hexdigest()[:24]
+    return digest
+
+
+def _cached_token(base: str, user: str, pwd: str) -> str:
+    key = _token_cache_key(base, user, pwd)
+    with _TOKEN_CACHE_LOCK:
+        if (
+            _TOKEN_CACHE.get("key") == key
+            and time.time() < float(_TOKEN_CACHE.get("expires") or 0)
+        ):
+            return str(_TOKEN_CACHE.get("token") or "")
+    return ""
+
+
+def _store_token(base: str, user: str, pwd: str, token: str) -> None:
+    key = _token_cache_key(base, user, pwd)
+    with _TOKEN_CACHE_LOCK:
+        _TOKEN_CACHE["key"] = key
+        _TOKEN_CACHE["token"] = token
+        _TOKEN_CACHE["expires"] = time.time() + _TOKEN_TTL_SECONDS
 
 
 def parse_import_sse(text: str) -> Dict[str, Any]:

@@ -141,6 +141,35 @@ def test_push_settings_store_roundtrip():
             pass
 
 
+def test_login_token_cache_reuse():
+    calls = []
+
+    def post(url, headers=None, timeout=None, proxies=None, impersonate=None, **kwargs):
+        calls.append(url)
+        if url.endswith("/auth/login"):
+            return FakeResp(200, {"data": {"tokens": {"accessToken": "eyJcached.jwt.token"}}})
+        return FakeResp(200, text=(
+            "event: complete\ndata: {\"created\":1,\"updated\":0,\"skipped\":0,\"failed\":0,\"synced\":0,\"syncFailed\":0}\n"
+        ))
+
+    for _ in range(3):
+        result = grok2api_push.push_sso(
+            post, "https://cache.example.com", "admin", "pw",
+            "u1@outlook.com", "tok1", proxy="",
+        )
+        assert result["ok"] is True
+    logins = [c for c in calls if c.endswith("/auth/login")]
+    imports = [c for c in calls if c.endswith("/accounts/web/import")]
+    assert len(logins) == 1 and len(imports) == 3  # 一次登录服务三个号
+
+    # 换服务地址/凭据则重新登录
+    grok2api_push.push_sso(
+        post, "https://other.example.com", "admin", "pw", "u2@outlook.com", "tok2", proxy="",
+    )
+    logins = [c for c in calls if c.endswith("/auth/login")]
+    assert len(logins) == 2
+
+
 def test_registration_wiring_present():
     ttk = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
     assert "_grok2api_push_if_enabled" in ttk
@@ -158,5 +187,6 @@ if __name__ == "__main__":
     test_parse_import_sse()
     test_push_sso_end_to_end()
     test_push_settings_store_roundtrip()
+    test_login_token_cache_reuse()
     test_registration_wiring_present()
     print("OK grok2api push")
