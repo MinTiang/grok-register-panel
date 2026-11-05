@@ -50,6 +50,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from curl_cffi import requests
+
+from webui import grok2api_push
+
+
+class _Grok2ApiPushSkip(Exception):
+    """降智过滤命中，跳过 grok2api 推送（不算失败）。"""
 from secure_files import (
     append_private_text,
     atomic_write_json,
@@ -2574,6 +2580,45 @@ def main() -> int:
                         proxy=args.proxy,
                     )
                     print(f"  💾 CPA 远程 → {args.cpa_remote_url.rstrip('/')}/.../{name}")
+
+            # grok2api 推送开关：补录成功后按 config.json 配置推送 SSO（失败不影响补录结果）
+            if grok2api_push.is_push_enabled(config):
+                try:
+                    if grok2api_push.push_only_clean(config):
+                        verdict = str((cpa_record or {}).get("quality_verdict") or "").strip()
+                        if not verdict:
+                            from quality_probe import probe_account as _probe_account
+
+                            probed = _probe_account(cpa_record or {}, proxy=args.proxy or "")
+                            verdict = str(probed.get("verdict") or "error")
+                            print(f"  [推送] 实时降智短测 verdict={verdict} tps={probed.get('tps')}")
+                        if verdict != "healthy":
+                            print(f"  [推送] 跳过 grok2api 推送：降智检测未通过（verdict={verdict}）")
+                            raise _Grok2ApiPushSkip()
+                    push_result = grok2api_push.push_sso(
+                        requests.post,
+                        config.get("grok2api_push_url") or "",
+                        config.get("grok2api_push_username") or "",
+                        config.get("grok2api_push_password") or "",
+                        email,
+                        sso,
+                        proxy=args.proxy or "",
+                    )
+                    if push_result.get("ok"):
+                        print(
+                            f"  🚀 已推送 SSO 到 grok2api"
+                            f"（created={push_result.get('created', 0)}"
+                            f" updated={push_result.get('updated', 0)}"
+                            f" skipped={push_result.get('skipped', 0)}）"
+                        )
+                    else:
+                        print(f"  ⚠️ grok2api 推送未生效: {push_result.get('message')}")
+                except _Grok2ApiPushSkip:
+                    pass
+                except grok2api_push.Grok2ApiPushError as push_exc:
+                    print(f"  ⚠️ grok2api 推送失败: {redact_log_line(str(push_exc))}")
+                except Exception as push_exc:
+                    print(f"  ⚠️ grok2api 推送异常: {redact_log_line(str(push_exc))}")
 
             ok += 1
             succeeded_ssos.add(sso)

@@ -75,6 +75,8 @@ from webui.email_domain_store import (
     record_domain_result as _record_managed_email_domain_result,
     select_domain as _select_managed_email_domain,
 )
+from webui.grok2api_push import Grok2ApiPushError, push_sso as _grok2api_push_sso_api
+from webui.push_settings_store import is_push_enabled as _g2a_push_enabled, push_only_clean as _g2a_push_only_clean
 from webui.security_utils import redact_log_line as redact_sensitive_log_line
 from browser_session import (
 
@@ -254,6 +256,12 @@ DEFAULT_CONFIG = {
     "outlook_pool_api_key": "",
     "outlook_pool_project": "grok",
     "outlook_pool_alias_mode": "plus",
+    # grok2api SSO 推送（可开关）：注册/补录成功后把 sso cookie 推到 grok2api 的 Grok Web 池
+    "grok2api_push_enabled": False,
+    "grok2api_push_url": "",
+    "grok2api_push_username": "",
+    "grok2api_push_password": "",
+    "grok2api_push_only_clean": False,
     "outlook_accounts_file": "keys/outlook_pending.txt",
     "outlook_used_file": "keys/outlook_used.txt",
     "outlook_proxy": "",
@@ -1037,6 +1045,71 @@ def _append_sso_pending(email: str, sso: str, log_callback=None):
             log_callback(f"[CPA] 写入 sso_pending 失败: {exc}")
 
 
+def _grok2api_push_if_enabled(email, sso, record, proxy, log_callback=None):
+    """注册成功后按开关把 SSO 推送到 grok2api 的 Grok Web 账号池。
+
+    grok2api_push_only_clean 开启时先做一次实时降智短测：
+    verdict != healthy（降智/风控/失败）的号不推送。推送失败不影响注册结果。
+    """
+    if not sso or not _g2a_push_enabled():
+        return
+    base = str(config.get("grok2api_push_url") or "").strip()
+    user = str(config.get("grok2api_push_username") or "").strip()
+    pwd = str(config.get("grok2api_push_password") or "")
+    if not base or not user or not pwd:
+        log_callback("[推送] grok2api 推送已启用但 URL/用户名/密码不完整，跳过")
+        return
+
+    def _log(msg: str) -> None:
+        if log_callback:
+            log_callback(msg)
+
+    if _g2a_push_only_clean():
+        verdict = ""
+        reason = ""
+        if isinstance(record, dict) and str(record.get("quality_verdict") or "").strip():
+            # 复用入库短测的标注（quality_probe_on_register 开启时已打过）
+            verdict = str(record.get("quality_verdict"))
+            reason = f"quality_verdict={verdict} tps={record.get('quality_tps')}"
+        else:
+            try:
+                from quality_probe import probe_account  # 局部导入，避免常态加载
+
+                probed = probe_account(record if isinstance(record, dict) else {}, proxy=proxy or "")
+                verdict = str(probed.get("verdict") or "error")
+                reason = probed.get("error") or f"tps={probed.get('tps')}"
+            except Exception as probe_exc:
+                verdict = "error"
+                reason = redact_sensitive_log_line(str(probe_exc))[:120]
+        if verdict != "healthy":
+            _log(f"[推送] 跳过 grok2api 推送：降智检测未通过（{reason}）")
+            return
+        _log(f"[推送] 降智检测通过（{reason}），继续推送")
+
+    try:
+        result = _grok2api_push_sso_api(
+            http_post,
+            base,
+            user,
+            pwd,
+            email or "",
+            sso or "",
+            proxy=proxy or "",
+        )
+        if result.get("ok"):
+            _log(
+                "[推送] 已推送 SSO 到 grok2api"
+                f"（created={result.get('created', 0)} updated={result.get('updated', 0)}"
+                f" skipped={result.get('skipped', 0)}）"
+            )
+        else:
+            _log(f"[推送] grok2api 推送未生效: {result.get('message')}")
+    except Grok2ApiPushError as push_exc:
+        _log(f"[推送] grok2api 推送失败: {redact_sensitive_log_line(str(push_exc))}")
+    except Exception as push_exc:
+        _log(f"[推送] grok2api 推送异常: {redact_sensitive_log_line(str(push_exc))}")
+
+
 def _append_sso_risk_rejected(email: str, sso: str, details: str, log_callback=None):
     """保存注册风控拒绝的 SSO；该类账号不进入待重转队列。"""
     try:
@@ -1324,6 +1397,8 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
                 wrote_ok = True
             except Exception as g2a_exc:
                 _cpa_log(f"Grok2API 写入失败: {g2a_exc}")
+        # grok2api 推送开关：注册成功拿到 sso 后按配置推送（失败不影响注册结果）
+        _grok2api_push_if_enabled(email, sso, record, proxy, log_callback=log_callback)
         if not wrote_ok:
             _cpa_log("token 已换出但 CPA/Grok2API 均未写入成功")
             _append_sso_pending(email, sso, log_callback=log_callback)

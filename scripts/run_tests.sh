@@ -32,6 +32,7 @@ tests=(
   tests/test_inbucket.py
   tests/test_outlook_rt.py
   tests/test_outlook_pool.py
+  tests/test_grok2api_push.py
   tests/test_email_domain_store.py
   tests/test_email_domain_worker_integration.py
   tests/test_docker_deploy.py

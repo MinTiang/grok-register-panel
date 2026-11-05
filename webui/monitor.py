@@ -54,6 +54,10 @@ try:
         save_email_provider_config,
         test_email_provider_config,
     )
+    from webui.push_settings_store import (
+        read_push_settings,
+        save_push_settings,
+    )
     from webui.process_utils import (
         find_managed_processes,
         terminate_managed_processes,
@@ -2360,9 +2364,49 @@ HTML = r"""<!DOCTYPE html>
               </table>
             </div>
           </div>
-        </div>
-      </details>
+          </div>
+        </details>
     </div>
+  </section>
+
+  <section class="card panel push-panel" id="push-panel" aria-labelledby="push-title">
+    <div class="section-head">
+      <div class="page-title" id="push-title">grok2api 推送</div>
+      <span class="section-meta mono" id="push-status">未启用</span>
+    </div>
+    <div class="control-grid">
+      <div class="field">
+        <label for="push-enabled">推送开关</label>
+        <select id="push-enabled">
+          <option value="off">关闭</option>
+          <option value="on">开启</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="push-url">grok2api 地址</label>
+        <input id="push-url" type="url" placeholder="https://grok2api.example.com" spellcheck="false"/>
+      </div>
+      <div class="field">
+        <label for="push-username">管理员用户名</label>
+        <input id="push-username" autocomplete="off" spellcheck="false"/>
+      </div>
+      <div class="field">
+        <label for="push-password">管理员密码</label>
+        <input id="push-password" type="password" autocomplete="new-password" placeholder="留空保留已保存的密码"/>
+      </div>
+      <div class="field">
+        <label for="push-only-clean">降智过滤</label>
+        <select id="push-only-clean">
+          <option value="off">关闭（全部推送）</option>
+          <option value="on">只推不降智的号</option>
+        </select>
+      </div>
+      <div class="control-actions">
+        <button class="primary" onclick="savePushSettings()">保存推送设置</button>
+      </div>
+    </div>
+    <div class="msg" id="push-msg" role="status" aria-live="polite"></div>
+    <p class="section-meta">开启后，注册/账号补录成功时把 grok.com SSO 以 Grok Web 账号推送到 grok2api 的账号池（chenyme/grok2api 管理接口）。开启「降智过滤」后，推送前先做一次实时短测：降智/风控的号不推送；已带入库短测标注的号直接复用标注。推送失败不影响注册与入库结果。</p>
   </section>
 
   <section class="sso-view" id="sso-view" aria-labelledby="sso-view-title" hidden>
@@ -3225,6 +3269,47 @@ async function refreshEmailProvider(authHelp = false) {
     const message = String(e.message || e);
     document.getElementById("mail-provider-heading-label").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
     setMsg("mail-provider-msg", message, "err");
+  }
+  refreshPushSettings(authHelp);
+}
+
+async function refreshPushSettings(authHelp = false) {
+  try {
+    const data = await api("/api/push-settings?_=" + Date.now(), { authHelp });
+    if (!data || !data.values) return;
+    document.getElementById("push-enabled").value = data.values.grok2api_push_enabled ? "on" : "off";
+    document.getElementById("push-url").value = data.values.grok2api_push_url || "";
+    document.getElementById("push-username").value = data.values.grok2api_push_username || "";
+    document.getElementById("push-password").value = "";
+    document.getElementById("push-password").placeholder = data.password_configured ? "已保存（留空保留）" : "留空保留已保存的密码";
+    document.getElementById("push-only-clean").value = data.values.grok2api_push_only_clean ? "on" : "off";
+    document.getElementById("push-status").textContent = data.enabled ? "已启用" : "未启用";
+  } catch (e) {
+    const message = String(e.message || e);
+    document.getElementById("push-status").textContent = message.includes("令牌") ? "等待令牌" : "读取失败";
+  }
+}
+
+async function savePushSettings() {
+  setMsg("push-msg", "正在保存…", "");
+  try {
+    const result = await api("/api/push-settings", { method: "POST", body: JSON.stringify({
+      settings: {
+        grok2api_push_enabled: document.getElementById("push-enabled").value === "on",
+        grok2api_push_url: document.getElementById("push-url").value.trim(),
+        grok2api_push_username: document.getElementById("push-username").value.trim(),
+        grok2api_push_password: document.getElementById("push-password").value,
+        grok2api_push_only_clean: document.getElementById("push-only-clean").value === "on",
+      },
+    })});
+    if (result.ok) {
+      setMsg("push-msg", "推送设置已保存", "ok");
+      refreshPushSettings();
+    } else {
+      setMsg("push-msg", result.error || "保存失败", "err");
+    }
+  } catch (e) {
+    setMsg("push-msg", String(e.message || e), "err");
   }
 }
 async function saveEmailProviderConfig() {
@@ -4226,7 +4311,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/health":
             self._json(200, {"ok": True})
             return
-        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies", "/api/email-provider", "/api/email-domains", "/api/bfs", "/api/sso-state", "/api/quality"):
+        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies", "/api/email-provider", "/api/email-domains", "/api/bfs", "/api/sso-state", "/api/quality", "/api/push-settings"):
             if not self._require_read():
                 return
         if u.path == "/api/status":
@@ -4285,6 +4370,12 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/email-provider":
             try:
                 self._json(200, read_email_provider_config())
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/push-settings":
+            try:
+                self._json(200, read_push_settings())
             except Exception as e:
                 self._json(500, {"ok": False, "error": redact_log_line(str(e))})
             return
@@ -4451,6 +4542,15 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("settings") or {},
                     clear_secrets=body.get("clear_secrets"),
                 )
+                self._json(200, result)
+            except ValueError as e:
+                self._json(400, {"ok": False, "error": redact_log_line(str(e))})
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/push-settings":
+            try:
+                result = save_push_settings(body.get("settings") or {})
                 self._json(200, result)
             except ValueError as e:
                 self._json(400, {"ok": False, "error": redact_log_line(str(e))})
