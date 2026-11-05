@@ -2097,8 +2097,14 @@ def _outlook_pool_report(addr, outcome, detail=""):
         caller_id=f"grok-{os.getpid()}",
         detail=str(detail or "")[:200],
     )
-    if not result.get("ok") and debug_mode():
-        cli_log(f"[Debug] outlookEmail {outcome} 回报未成功: {result.get('message')}")
+    if not result.get("ok"):
+        # 回报失败（如服务 502）：保留登记避免 claim 记录丢失，并打出可见日志；
+        # 服务端租约到期后也会自动回收该邮箱，不会永久卡 claiming。
+        outlook_pool_provider.remember_claim(addr, claim)
+        cli_log(
+            f"[!] outlookEmail {outcome} 回报未成功: {result.get('message')}"
+            f"（{mask_email(addr)} 将随租约回池）"
+        )
 
 
 def outlook_pool_release_claim(addr):

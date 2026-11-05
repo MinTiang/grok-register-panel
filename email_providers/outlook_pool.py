@@ -123,20 +123,36 @@ def claim_mailbox(
         or f"task-{int(time.time())}-{secrets.token_hex(3)}",
         "lease_seconds": max(60, int(lease_seconds or DEFAULT_LEASE_SECONDS)),
     }
-    try:
-        resp = http_post(url, json=payload, headers=build_headers(api_key), timeout=25)
-    except Exception as exc:
-        raise OutlookPoolError(f"outlookEmail 服务请求失败: {_safe_message(exc)}") from exc
-    try:
-        body = resp.json()
-    except Exception:
-        body = None
-    if resp.status_code == 404:
-        raise OutlookPoolError(f"outlookEmail 项目不存在: {project}")
-    if resp.status_code in (401, 403):
-        raise OutlookPoolError(
-            f"outlookEmail API Key 无权限（HTTP {resp.status_code}，领取需要 readwrite 权限）"
-        )
+    resp = None
+    body = None
+    # 服务偶发 502/超时（单 worker Gunicorn），退避重试；确定性错误（404/403/池空）不重试
+    last_error = ""
+    for attempt in range(3):
+        try:
+            resp = http_post(url, json=payload, headers=build_headers(api_key), timeout=25)
+        except Exception as exc:
+            last_error = f"outlookEmail 服务请求失败: {_safe_message(exc)}"
+            if attempt < 2:
+                time.sleep(3 * (attempt + 1))
+                continue
+            raise OutlookPoolError(last_error) from exc
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+        if resp.status_code == 404:
+            raise OutlookPoolError(f"outlookEmail 项目不存在: {project}")
+        if resp.status_code in (401, 403):
+            raise OutlookPoolError(
+                f"outlookEmail API Key 无权限（HTTP {resp.status_code}，领取需要 readwrite 权限）"
+            )
+        if resp.status_code >= 500 and attempt < 2:
+            last_error = f"outlookEmail 领取失败 HTTP {resp.status_code}"
+            time.sleep(3 * (attempt + 1))
+            continue
+        break
+    if resp is None:
+        raise OutlookPoolError(last_error or "outlookEmail 领取失败")
     if resp.status_code >= 400:
         raise OutlookPoolError(f"outlookEmail 领取失败: {_extract_error(body, resp.status_code)}")
     if not isinstance(body, dict) or not body.get("success"):
@@ -189,17 +205,28 @@ def complete_claim(
     }
     if detail:
         payload["detail"] = str(detail)[:300]
-    try:
-        resp = http_post(url, json=payload, headers=build_headers(api_key), timeout=20)
-    except Exception as exc:
-        return {"ok": False, "message": f"outlookEmail 回报失败: {_safe_message(exc)}"}
-    try:
-        body = resp.json()
-    except Exception:
-        body = None
-    if resp.status_code >= 400 or not (isinstance(body, dict) and body.get("success")):
-        return {"ok": False, "message": _extract_error(body, resp.status_code)}
-    return {"ok": True, "message": ""}
+    message = ""
+    for attempt in range(3):
+        try:
+            resp = http_post(url, json=payload, headers=build_headers(api_key), timeout=20)
+        except Exception as exc:
+            message = f"outlookEmail 回报失败: {_safe_message(exc)}"
+            if attempt < 2:
+                time.sleep(3 * (attempt + 1))
+                continue
+            return {"ok": False, "message": message}
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+        if resp.status_code >= 500 and attempt < 2:
+            message = f"outlookEmail 回报 HTTP {resp.status_code}"
+            time.sleep(3 * (attempt + 1))
+            continue
+        if resp.status_code >= 400 or not (isinstance(body, dict) and body.get("success")):
+            return {"ok": False, "message": _extract_error(body, resp.status_code)}
+        return {"ok": True, "message": ""}
+    return {"ok": False, "message": message}
 
 
 def fetch_emails(
