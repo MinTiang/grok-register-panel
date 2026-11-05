@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-06
+
+### Added
+
+- 新增 grok2api SSO 推送（可开关）：注册/账号补录成功后把 grok.com SSO 以 Grok Web 账号推送到 chenyme/grok2api 的账号池（管理登录 + `accounts/web/import` multipart 导入，SSE 结果统计 created/updated/skipped）。面板新增「grok2api 推送」设置卡（地址 / 管理员凭据 / 开关），凭据不回显、留空保留。
+- 推送降智过滤：`只推不降智的号` 开启后，推送前做实时降智短测（复用入库短测标注，无标注才实时探测），降智/风控的号不推送；推送失败不影响注册与入库结果。
+
 ## 0.8.0 - 2026-11-05
 
 ### Added
