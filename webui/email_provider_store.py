@@ -20,6 +20,7 @@ CONFIG_PATH = Path(
 LOCK_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".lock")
 
 PROVIDER_LABELS = {
+    "outlook_pool": "Outlook 池（outlookEmail）",
     "outlook_rt": "Outlook RT 库存（推荐）",
     "duckmail": "DuckMail / Mail.tm",
     "mailnest": "MailNest",
@@ -30,6 +31,7 @@ PROVIDER_LABELS = {
     "inbucket": "Inbucket",
 }
 PROVIDER_KIND = {
+    "outlook_pool": "mailbox",
     "outlook_rt": "mailbox",
     "duckmail": "mailbox",
     "mailnest": "mailbox",
@@ -40,6 +42,7 @@ PROVIDER_KIND = {
     "inbucket": "domain",
 }
 PROVIDER_HINTS = {
+    "outlook_pool": "自建 outlookEmail 服务：项目池领取 + Outlook 别名注册，成败自动回报",
     "outlook_rt": "推荐：Outlook 等真实邮箱，配合家宽出口",
     "duckmail": "第三方临时邮，稳定性不如 Outlook",
     "mailnest": "第三方临时邮，稳定性不如 Outlook",
@@ -190,6 +193,32 @@ FIELD_DEFINITIONS = {
             {"value": 0, "label": "永久"},
         ],
     },
+    "outlook_pool_api_base": {
+        "label": "服务地址",
+        "type": "url",
+        "placeholder": "https://olp.example.com",
+    },
+    "outlook_pool_api_key": {
+        "label": "API Key（readwrite）",
+        "type": "password",
+        "secret": True,
+        "placeholder": "设置 → 对外 API Key；领取/回报需要 readwrite",
+    },
+    "outlook_pool_project": {
+        "label": "项目 Key",
+        "type": "text",
+        "default": "grok",
+    },
+    "outlook_pool_alias_mode": {
+        "label": "别名模式",
+        "type": "select",
+        "default": "plus",
+        "options": [
+            {"value": "plus", "label": "plus 别名（local+tag@域，无需预登记）"},
+            {"value": "configured", "label": "服务端登记的别名（无则回退 plus）"},
+            {"value": "primary", "label": "主邮箱原地址"},
+        ],
+    },
     "outlook_rt_inventory": {
         "label": "库存文件路径",
         "type": "text",
@@ -231,6 +260,12 @@ FIELD_DEFINITIONS = {
 }
 
 PROVIDER_FIELDS = {
+    "outlook_pool": (
+        "outlook_pool_api_base",
+        "outlook_pool_api_key",
+        "outlook_pool_project",
+        "outlook_pool_alias_mode",
+    ),
     "cloudflare": (
         "cloudflare_api_base",
         "cloudflare_auth_mode",
@@ -392,6 +427,11 @@ def _normalize_value(name: str, value: object):
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", text):
             raise EmailProviderConfigError("项目代码格式无效")
         return text
+    if name == "outlook_pool_project":
+        text = _string(value) or str(definition.get("default") or "")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", text):
+            raise EmailProviderConfigError("项目 Key 格式无效")
+        return text
     if name == "outlook_rt_client_id":
         text = _string(value) or str(definition.get("default") or "")
         if text and not re.fullmatch(r"[A-Za-z0-9._-]{8,80}", text):
@@ -415,6 +455,10 @@ def _merged(raw: dict) -> dict:
 
 
 def _is_configured(provider: str, values: dict) -> bool:
+    if provider == "outlook_pool":
+        return bool(
+            values.get("outlook_pool_api_base") and values.get("outlook_pool_api_key")
+        )
     if provider == "cloudflare":
         return bool(values.get("cloudflare_api_base"))
     if provider == "duckmail":

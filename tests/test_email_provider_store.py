@@ -54,9 +54,12 @@ def test_provider_schema_and_defaults():
             "mailnest",
             "cloudmail",
             "moemail",
+            "outlook_pool",
             "outlook_rt",
             "inbucket",
         }
+        assert providers["outlook_pool"]["kind"] == "mailbox"
+        assert providers["outlook_pool"]["configured"] is False
         assert providers["outlook_rt"]["configured"] is False
         assert providers["outlook_rt"]["recommended"] is True
         assert providers["outlook_rt"]["kind"] == "mailbox"

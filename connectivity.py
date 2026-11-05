@@ -205,6 +205,52 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
             )
             return "邮箱API", resp.status_code < 400, f"MailNest 站点 HTTP {resp.status_code}"
 
+        if provider == "outlook_pool":
+            from email_providers import outlook_pool as outlook_pool_provider
+
+            base = str(config.get("outlook_pool_api_base", "") or "").rstrip("/")
+            key = str(config.get("outlook_pool_api_key", "") or "").strip()
+            project = str(config.get("outlook_pool_project", "") or "").strip() or "grok"
+            if not base or not key:
+                return "邮箱API", False, "outlookEmail 需配置服务地址与 API Key"
+            try:
+                resp = http_get(
+                    f"{outlook_pool_provider.normalize_base(base)}/api/external/projects",
+                    headers=outlook_pool_provider.build_headers(key),
+                    timeout=12,
+                )
+            except Exception as exc:
+                return "邮箱API", False, f"outlookEmail 服务不可达: {exc}"
+            if resp.status_code in (401, 403):
+                return "邮箱API", False, f"outlookEmail API Key 无效 HTTP {resp.status_code}"
+            if resp.status_code >= 400:
+                return "邮箱API", False, f"outlookEmail HTTP {resp.status_code}"
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            projects = (data.get("data") or {}).get("projects") or []
+            target = next(
+                (p for p in projects if str(p.get("project_key") or "") == project), None
+            )
+            if target is None:
+                available = ",".join(
+                    str(p.get("project_key") or "") for p in projects[:5]
+                )
+                return (
+                    "邮箱API",
+                    False,
+                    f"outlookEmail 项目 {project} 不存在（现有: {available or '无'}）",
+                )
+            if target.get("archived") or not target.get("active", True):
+                return "邮箱API", False, f"outlookEmail 项目 {project} 已停用"
+            to_claim = target.get("to_claim_count")
+            return (
+                "邮箱API",
+                True,
+                f"outlookEmail 可达，项目 {project} 待领取 {to_claim if to_claim is not None else '?'}",
+            )
+
         if provider == "cloudmail":
             url = str(config.get("cloudmail_url", "") or "").rstrip("/")
             if not url:

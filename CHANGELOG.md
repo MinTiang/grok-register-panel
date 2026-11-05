@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.8.0 - 2026-11-05
+
+### Added
+
+- 新增 `outlook_pool` 邮箱 provider：对接自建 [outlookEmail](https://github.com/assast/outlookEmail) 服务，从项目邮箱池 `claim-random` 领取 Outlook 账号，用 Outlook plus 别名地址（`local+tag@域`，服务端自动解析收信，无需预登记别名）注册；注册成败自动回报 `complete-success` / `complete-failed`，填邮箱前失败自动 `release` 回池，浏览器崩溃/卡住按可重试放回并由租约兜底。
+- 面板「邮箱服务」新增 provider 卡片：服务地址 / readwrite API Key / 项目 Key / 别名模式（plus · configured · primary）；连接测试校验服务可达、Key 权限与项目存在性并报待领取数量。密钥保持不回显、留空保留、显式清除语义。
+
 ## 0.7.1 - 2026-11-05
 
 ### Changed

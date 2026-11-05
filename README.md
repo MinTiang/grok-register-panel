@@ -171,7 +171,9 @@ docker compose up -d
 
 | 字段 | 说明 |
 |------|------|
-| `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `outlook` / `outlook_rt` / `inbucket` |
+| `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` / `outlook` / `outlook_pool` / `outlook_rt` / `inbucket` |
+| `outlook_pool_api_base` / `outlook_pool_api_key` | outlookEmail 池：自建服务地址与 readwrite API Key；从项目邮箱池领取，成败自动回报 |
+| `outlook_pool_project` / `outlook_pool_alias_mode` | 项目 Key（默认 `grok`）；别名模式 `plus`（`local+tag@域`，无需预登记）/ `configured`（服务端登记的别名）/ `primary` |
 | `outlook_rt_inventory` | Outlook MSA 库存路径（jsonl：`email`+`refresh_token`；或 `email----rt`） |
 | `outlook_rt_used_path` | 已用邮箱记录（可选；默认 `库存路径.used`） |
 | `outlook_rt_client_id` | 可选 Client ID；默认 Microsoft Authentication Broker 公共客户端 |

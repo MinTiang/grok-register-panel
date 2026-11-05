@@ -49,6 +49,10 @@
   "outlook_accounts_file": "keys/outlook_pending.txt",
   "outlook_used_file": "keys/outlook_used.txt",
   "outlook_proxy": "",
+  "outlook_pool_api_base": "",
+  "outlook_pool_api_key": "",
+  "outlook_pool_project": "grok",
+  "outlook_pool_alias_mode": "plus",
   "inbucket_api_base": "",
   "inbucket_domain": "",
   "inbucket_random_levels": "0"

@@ -39,6 +39,7 @@ from email_providers import inbucket as inbucket_provider
 from email_providers import mailnest as mailnest_provider
 from email_providers import moemail as moemail_provider
 from email_providers import outlook as outlook_provider
+from email_providers import outlook_pool as outlook_pool_provider
 from email_providers import outlook_rt as outlook_rt_provider
 from email_providers import yyds as yyds_provider
 from email_providers.common import extract_verification_code as _extract_code
@@ -248,6 +249,11 @@ DEFAULT_CONFIG = {
     "outlook_rt_inventory": "",
     "outlook_rt_used_path": "",
     "outlook_rt_client_id": outlook_rt_provider.DEFAULT_CLIENT_ID,
+    # outlookEmail 池（自建 outlookEmail 服务）：项目领取 + Outlook 别名注册
+    "outlook_pool_api_base": "",
+    "outlook_pool_api_key": "",
+    "outlook_pool_project": "grok",
+    "outlook_pool_alias_mode": "plus",
     "outlook_accounts_file": "keys/outlook_pending.txt",
     "outlook_used_file": "keys/outlook_used.txt",
     "outlook_proxy": "",
@@ -448,7 +454,25 @@ def record_register_result(
                 log_callback(f"[结果] 写入 jsonl 失败: {exc}")
             except Exception:
                 pass
+    try:
+        _notify_outlook_pool_result(status, kind, email, detail)
+    except Exception:
+        pass
     return rec
+
+
+def _release_email_hook():
+    """register_flow 的 release_email 依赖：仅 outlook / outlook_pool 需要回池。"""
+    provider = get_email_provider()
+    if provider == "outlook":
+        return lambda addr: outlook_provider.release(
+            config.get("outlook_accounts_file", "keys/outlook_pending.txt"),
+            config.get("outlook_used_file", "keys/outlook_used.txt"),
+            addr,
+        )
+    if provider == "outlook_pool":
+        return outlook_pool_release_claim
+    return None
 
 
 def classify_failure(exc) -> str:
@@ -1917,6 +1941,8 @@ def get_email_and_token(api_key=None):
         return mailnest_buy_email(), "_"
     if provider == "inbucket":
         return inbucket_get_email_and_token(domain=managed_domain)
+    if provider == "outlook_pool":
+        return outlook_pool_take_mailbox()
     if provider == "outlook":
         return outlook_provider.create_mailbox(
             config.get("outlook_accounts_file", "keys/outlook_pending.txt"),
@@ -1997,6 +2023,106 @@ def outlook_rt_get_code(
     )
 
 
+def get_outlook_pool_base():
+    return str(config.get("outlook_pool_api_base", "") or "").strip()
+
+
+def get_outlook_pool_key():
+    return str(config.get("outlook_pool_api_key", "") or "").strip()
+
+
+def get_outlook_pool_project():
+    return str(config.get("outlook_pool_project", "") or "").strip() or "grok"
+
+
+def get_outlook_pool_alias_mode():
+    mode = str(config.get("outlook_pool_alias_mode", "") or "plus").strip().lower()
+    return mode if mode in outlook_pool_provider.ALIAS_MODES else "plus"
+
+
+_OUTLOOK_POOL_ALIASES_CACHE = {"ts": 0.0, "map": {}}
+
+
+def _outlook_pool_aliases():
+    """configured 模式用：服务端登记的 主邮箱→别名 映射（5 分钟缓存）。"""
+    now = time.time()
+    if now - float(_OUTLOOK_POOL_ALIASES_CACHE["ts"] or 0) > 300:
+        try:
+            _OUTLOOK_POOL_ALIASES_CACHE["map"] = outlook_pool_provider.fetch_account_aliases(
+                http_get, get_outlook_pool_base(), get_outlook_pool_key()
+            )
+        except Exception as exc:
+            if is_debug_mode():
+                cli_log(f"[Debug] outlookEmail 别名列表拉取失败: {exc}")
+        _OUTLOOK_POOL_ALIASES_CACHE["ts"] = now
+    return _OUTLOOK_POOL_ALIASES_CACHE["map"]
+
+
+def outlook_pool_take_mailbox():
+    """从 outlookEmail 项目池领取邮箱，返回 (注册用别名地址, 打包的 claim 上下文)。"""
+    base = outlook_pool_provider.normalize_base(get_outlook_pool_base())
+    key = get_outlook_pool_key()
+    if not key:
+        raise Exception("outlook_pool_api_key 未配置（领取需要 readwrite 权限的 API Key）")
+    claim = outlook_pool_provider.claim_mailbox(
+        http_post,
+        base,
+        key,
+        get_outlook_pool_project(),
+        caller_id=f"grok-{os.getpid()}",
+    )
+    primary = claim.get("email") or ""
+    mode = get_outlook_pool_alias_mode()
+    aliases = (
+        _outlook_pool_aliases().get(primary.strip().lower(), []) if mode == "configured" else []
+    )
+    used = outlook_pool_provider.build_alias_address(primary, mode=mode, aliases=aliases)
+    outlook_pool_provider.remember_claim(used, claim)
+    return used, outlook_pool_provider.pack_claim(claim, used, mode)
+
+
+def _outlook_pool_report(addr, outcome, detail=""):
+    """按注册用地址回报项目状态机（success/failed/release）；找不到领取记录则忽略。"""
+    claim = outlook_pool_provider.pop_claim(addr)
+    if not claim:
+        return
+    result = outlook_pool_provider.complete_claim(
+        http_post,
+        get_outlook_pool_base(),
+        get_outlook_pool_key(),
+        claim.get("project_key") or get_outlook_pool_project(),
+        account_id=claim.get("account_id"),
+        claim_token=claim.get("claim_token") or "",
+        outcome=outcome,
+        caller_id=f"grok-{os.getpid()}",
+        detail=str(detail or "")[:200],
+    )
+    if not result.get("ok") and debug_mode():
+        cli_log(f"[Debug] outlookEmail {outcome} 回报未成功: {result.get('message')}")
+
+
+def outlook_pool_release_claim(addr):
+    """register_flow 的 release_email 钩子：填邮箱/提交前失败，把邮箱放回池子。"""
+    _outlook_pool_report(addr, "release", "注册前失败，邮箱回池")
+
+
+def _notify_outlook_pool_result(status, kind, email, detail):
+    """record_register_result 钩子：按最终结果回报 outlookEmail 项目。"""
+    if get_email_provider() != "outlook_pool":
+        return
+    addr = str(email or "").strip()
+    if not addr or not outlook_pool_provider.peek_claim(addr):
+        return
+    if status == "ok":
+        outcome = "success"
+    elif kind in (FAIL_BROWSER, FAIL_STUCK):
+        # 浏览器崩溃/卡住时无法确定邮箱是否已提交，先放回池子由租约兜底
+        outcome = "release"
+    else:
+        outcome = "failed"
+    _outlook_pool_report(addr, outcome, detail)
+
+
 def get_oai_code(
     dev_token,
     email,
@@ -2062,6 +2188,22 @@ def get_oai_code(
             timeout=timeout,
             poll_interval=poll_interval,
             log_callback=log_callback,
+            cancel_callback=cancel_callback,
+            resend_callback=resend_callback,
+        )
+    if provider == "outlook_pool":
+        return outlook_pool_provider.wait_for_code(
+            http_get,
+            get_outlook_pool_base(),
+            get_outlook_pool_key(),
+            dev_token,
+            email,
+            timeout=max(int(timeout or 0), 240),
+            poll_interval=max(3, int(poll_interval or 4)),
+            extract_code=extract_verification_code,
+            log_callback=log_callback,
+            raise_if_cancelled=raise_if_cancelled,
+            sleep_with_cancel=sleep_with_cancel,
             cancel_callback=cancel_callback,
             resend_callback=resend_callback,
         )
@@ -2693,15 +2835,7 @@ def _wire_runtime_modules():
     )
     _rf.configure(
         get_email_and_token=get_email_and_token,
-        release_email=(
-            lambda addr: outlook_provider.release(
-                config.get("outlook_accounts_file", "keys/outlook_pending.txt"),
-                config.get("outlook_used_file", "keys/outlook_used.txt"),
-                addr,
-            )
-        )
-        if config.get("email_provider") == "outlook"
-        else None,
+        release_email=_release_email_hook(),
         get_oai_code=get_oai_code,
         on_email_accepted=_record_email_domain_accepted,
         on_email_domain_rejected=_record_email_domain_rejected,
@@ -3380,6 +3514,7 @@ class GrokRegisterGUI:
             "cloudmail": "CloudMail 配置",
             "moemail": "MoeMail 配置",
             "outlook": "Outlook 卡池配置（含失败回收）",
+            "outlook_pool": "Outlook 池配置（outlookEmail 服务）",
             "outlook_rt": "Outlook RT 库存配置（推荐）",
         }
         self.provider_frame.configure(text=titles.get(provider, "邮箱服务商配置"))
