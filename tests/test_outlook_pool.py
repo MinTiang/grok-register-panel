@@ -74,6 +74,7 @@ def test_claim_mailbox_success_and_errors():
     url, payload, headers = calls[0]
     assert url.endswith("/api/external/projects/grok/claim-random")
     assert payload["caller_id"] == "w1" and payload["lease_seconds"] == 900
+    assert payload["task_id"]  # 服务端必填，未传时自动生成
     assert headers["X-API-Key"] == "key-1"
 
     def empty_post(*_a, **_k):

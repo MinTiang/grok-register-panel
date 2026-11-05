@@ -118,10 +118,11 @@ def claim_mailbox(
     url = f"{base}/api/external/projects/{quote(project, safe='')}/claim-random"
     payload: Dict[str, Any] = {
         "caller_id": str(caller_id or "grok-worker"),
+        # 部署版服务强制要求 task_id；未提供时自动生成
+        "task_id": str(task_id or "").strip()
+        or f"task-{int(time.time())}-{secrets.token_hex(3)}",
         "lease_seconds": max(60, int(lease_seconds or DEFAULT_LEASE_SECONDS)),
     }
-    if task_id:
-        payload["task_id"] = str(task_id)
     try:
         resp = http_post(url, json=payload, headers=build_headers(api_key), timeout=25)
     except Exception as exc:
