@@ -88,13 +88,19 @@ def login(http_post: Any, base_url: str, username: str, password: str, *, proxy:
 
 
 def parse_import_sse(text: str) -> Dict[str, Any]:
-    """解析 web/import 的 SSE 响应，统计 created/updated/skipped/failed。"""
+    """解析 web/import 的 SSE 响应。
+
+    服务端事件流：progress（阶段进度）→ complete（data 内含
+    created/updated/skipped/failed/synced/syncFailed 汇总）→ 或 error。
+    """
     result = {
         "created": 0,
         "updated": 0,
         "skipped": 0,
         "failed": 0,
-        "ok": True,
+        "synced": 0,
+        "syncFailed": 0,
+        "ok": False,
         "message": "",
     }
     event = ""
@@ -115,8 +121,10 @@ def parse_import_sse(text: str) -> Dict[str, Any]:
             result["message"] = _redact(
                 (payload.get("message") or payload.get("error") or payload.get("code") or "导入失败")
             )
-        elif event in ("created", "updated", "skipped", "failed"):
-            result[event] = result.get(event, 0) + 1
+        elif event == "complete":
+            for key in ("created", "updated", "skipped", "failed", "synced", "syncFailed"):
+                result[key] = int(payload.get(key) or 0)
+            result["ok"] = True
         elif event == "done":
             message = payload.get("message") or payload
             if message and not result["message"]:
@@ -177,7 +185,6 @@ def push_sso(
     if resp.status_code >= 400:
         raise Grok2ApiPushError(f"grok2api 导入请求失败 HTTP {resp.status_code}: {_redact(resp.text)}")
     result = parse_import_sse(resp.text or "")
-    result["ok"] = bool(result["ok"]) and (result["created"] + result["updated"]) > 0
-    if not result["ok"] and not result["message"]:
-        result["message"] = "导入未产生新增/更新"
+    if result["ok"] and not result["message"] and result.get("syncFailed"):
+        result["message"] = f"web 池已入池，console 同步失败 {result['syncFailed']}（不影响使用）"
     return result

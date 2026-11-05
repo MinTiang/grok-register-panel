@@ -37,17 +37,15 @@ def test_build_import_document():
 def test_parse_import_sse():
     sse = (
         ": connected\n"
-        "event: created\ndata: {\"id\": 1}\n"
-        "\n"
-        "event: updated\ndata: {\"id\": 2}\n"
+        "event: progress\ndata: {\"completed\":0,\"total\":1,\"phase\":\"importing\"}\n"
         "\n"
         "event: skipped\ndata: {}\n"
         "event: failed\ndata: {\"reason\": \"x\"}\n"
-        "event: done\ndata: {\"message\": \"ok\"}\n"
+        "event: complete\ndata: {\"created\":1,\"updated\":0,\"skipped\":1,\"failed\":1,\"synced\":0,\"syncFailed\":1}\n"
     )
     result = grok2api_push.parse_import_sse(sse)
-    assert result["created"] == 1 and result["updated"] == 1
-    assert result["skipped"] == 1 and result["failed"] == 1
+    assert result["created"] == 1 and result["skipped"] == 1
+    assert result["failed"] == 1 and result["syncFailed"] == 1
     assert result["ok"] is True
 
     err = grok2api_push.parse_import_sse(
@@ -64,8 +62,8 @@ def test_push_sso_end_to_end():
         if url.endswith("/auth/login"):
             return FakeResp(200, {"data": {"tokens": {"accessToken": "eyJlogin.jwt.token"}}})
         return FakeResp(200, text=(
-            "event: created\ndata: {}\n"
-            "event: done\ndata: {}\n"
+            "event: progress\ndata: {\"completed\":1,\"total\":1,\"phase\":\"syncing\"}\n"
+            "event: complete\ndata: {\"created\":1,\"updated\":0,\"skipped\":0,\"failed\":0,\"synced\":0,\"syncFailed\":0}\n"
         ))
 
     result = grok2api_push.push_sso(
