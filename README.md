@@ -197,6 +197,9 @@ docker compose up -d
 | `cpa_auto_add` | 是否 SSO→OAuth 并写入 auth |
 | `cpa_auth_dir` | 本地 CPA 目录（`xai-*.json`） |
 | `grok2api_auth_dir` | Grok2API 风格 auth 目录 |
+| `grok2api_push_enabled` | 推送开关：注册/补录成功后把 grok.com SSO 以 Grok Web 账号推送到 chenyme/grok2api 账号池 |
+| `grok2api_push_url` / `grok2api_push_username` / `grok2api_push_password` | grok2api 管理地址与管理员凭据（面板「grok2api 推送」卡可配置；密码不回显） |
+| `grok2api_push_only_clean` | 只推不降智的号：推送前实时降智短测（复用入库短测标注），降智/风控的号不推送 |
 | `quality_probe_on_register` | 默认 `false`；打开后写入 auth 才短测降智。补录 CLI 用 `--quality-probe` |
 | `cpa_remote_url` / `cpa_management_key` | 远程 CPA Management API（可选） |
 
