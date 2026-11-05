@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.7.1 - 2026-11-05
+
+### Changed
+
+- `docker-compose.yaml` 的 `environment` 按「面板服务 / 浏览器指纹 / 重试恢复 / 代理池 / 邮箱账号 / 静态缓存 / 容器内不建议修改」七组补齐全部可调环境变量（代码中 39 个环境变量全覆盖，逐个标注默认值与取值范围）；明确业务配置（邮箱 provider、代理、并发、CPA/Grok2API、BFS、降智）在 `./data/config.json`，API key / 密码不得写进 compose（会出现在 `docker inspect`）。
+- Docker 文档补充 Grok2API auth 目录说明：输出目录由 `./data/config.json` 的 `grok2api_auth_dir` 决定（SSO→auth 转换脚本按 config 写入），`GROK2API_AUTH_DIR` 仅影响面板统计、BFS 检测与降智扫描目录。
+
+### Added
+
+- `tests/test_docker_deploy.py` 新增全量环境变量覆盖断言（36 个变量必须在 compose 中说明）与凭据泄露断言（DUCKMAIL / CLOUDMAIL / MOEMAIL_API_KEY / OUTLOOK_RT_INVENTORY 不得作为生效配置出现）。
+
 ## 0.7.0 - 2026-11-05
 
 ### Added

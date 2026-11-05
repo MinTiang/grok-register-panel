@@ -160,6 +160,7 @@ docker compose up -d
 要点：
 
 - **无需 `.env`**：所有配置集中在 `docker-compose.yaml` 的 `environment` 段，均有默认值；镜像 tag 用 `latest` 跟随最新发布，生产建议固定到具体 `v*` 版本。
+- **环境变量全量分组**：compose 的 `environment` 已按「面板服务 / 浏览器指纹 / 重试恢复 / 代理池 / 邮箱账号 / 静态缓存 / 容器内不建议修改」七组列出全部可调变量，未注释项即生效默认值，注释项附代码默认值、取消注释即生效。业务配置（邮箱 provider、代理池内容、并发数、CPA/Grok2API 导出、BFS、降智）在 `./data/config.json`；API key / 密码不要写进 compose（会出现在 `docker inspect`），放在 `./data/config.json` 或面板 UI。
 - **数据持久化**：唯一挂载点 `./data:/app/data`。`config.json`、`accounts/`、`cpa_auth/`、`grok2api_auth/`、`log/` 等运行数据都落在这里；首次启动自动生成 `./data/config.json`（示例配置），编辑后 `docker compose restart` 生效。
 - **令牌必填**：容器内面板绑定 `0.0.0.0`，应用规定非回环绑定必须配置 `MONITOR_TOKEN`，否则容器启动即退出。
 - **代理仍在面板配置**：注册出口代理不走容器网络，在面板「代理池」导入家宽/住宅代理，或编辑 `./data/config.json` 的 `proxy` 字段；保持一个账号全程固定一个代理。

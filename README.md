@@ -163,7 +163,9 @@ docker compose up -d
 
 浏览器引擎（Camoufox）、Xvfb、Playwright 依赖都已内置在镜像里，无需再执行
 `camoufox fetch`。所有持久化数据（`config.json`、账号、CPA/Grok2API auth、日志）
-都落在宿主机 `./data/` 目录。完整说明见 [DEPLOYMENT.md](DEPLOYMENT.md) 的 Docker 章节。
+都落在宿主机 `./data/` 目录。compose 的 `environment` 已分组列出全部可调环境变量
+（默认值与说明见注释），业务配置在 `./data/config.json`。完整说明见
+[DEPLOYMENT.md](DEPLOYMENT.md) 的 Docker 章节。
 
 ### 配置（`config.json`）
 

@@ -23,7 +23,7 @@
 services:
   panel:
     # GHCR 官方镜像;latest 跟随最新发布版,生产环境建议固定到具体 v* 版本,
-    # 例如 ghcr.io/mintiang/grok-register-panel:v0.7.0
+    # 例如 ghcr.io/mintiang/grok-register-panel:v0.7.1
     image: ghcr.io/mintiang/grok-register-panel:latest
     container_name: grok-register-panel
     restart: unless-stopped
@@ -31,24 +31,118 @@ services:
       # 宿主机端口:容器端口。修改 MONITOR_PORT 时需同步修改这里
       - "8787:8787"
     environment:
-      # ── 唯一必改项 ──────────────────────────────────────────────────────
-      # 面板访问令牌:UI 登录与所有启动/停止等写操作都要用它。
-      # 容器绑定 0.0.0.0,应用规定非回环绑定必须配置令牌,否则容器拒绝启动。
-      MONITOR_TOKEN: "change-me-to-a-long-random-token"
+      # ══════════════════════════════════════════════════════════════════
+      # 环境变量分组说明:
+      #   · 未注释 = 生效的默认值(容器开箱即用)
+      #   · 注释行   = 可选调整项,附代码默认值,取消注释即生效
+      #   · 业务配置(邮箱 provider、代理池内容、并发数、CPA/Grok2API 导出、
+      #     BFS 检测、降智测试等)不在环境变量里,写在 ./data/config.json
+      #     (首次启动自动生成,可在面板 UI 编辑)
+      #   · 邮箱/服务的 API key、密码不要写进本文件:compose 变量会出现在
+      #     `docker inspect` 与进程环境中;敏感凭据放 ./data/config.json 或面板 UI
+      # ══════════════════════════════════════════════════════════════════
 
-      # ── 以下保持默认即可 ────────────────────────────────────────────────
-      # 容器内监听地址/端口;镜像已默认 0.0.0.0:8787,列在这里便于按需修改
+      # ── 1. 面板服务 ───────────────────────────────────────────────────
+      # 唯一必改项:面板访问令牌(UI 登录与所有启动/停止/控制接口都校验它)。
+      # 容器绑定 0.0.0.0,应用规定非回环绑定必须配置令牌,否则容器拒绝启动。
+      # 生成:python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+      MONITOR_TOKEN: "change-me-to-a-long-random-token"
+      # 容器内监听地址/端口;修改端口时同步修改上方 ports 映射
       MONITOR_HOST: "0.0.0.0"
       MONITOR_PORT: "8787"
-      # 面板原始日志尾部开关:1=可在面板查看原始日志尾部(可能含敏感运行信息);
-      # 默认 0,更安全
+      # 原始日志尾部开关:1=面板可查看原始日志(可能含敏感运行信息);默认 0 更安全
       PANEL_INCLUDE_TAIL: "0"
-      # 无显示环境自动通过 xvfb-run 启动浏览器批次;镜像已内置 Xvfb,保持 auto
-      GROK_USE_XVFB: "auto"
       # 容器时区(面板内部固定按北京时间展示,此值主要影响容器日志时间戳)
       TZ: "Asia/Shanghai"
-      # 可选:CPA auth 输出目录;默认 /app/cpa_auth,已持久化到 ./data/cpa_auth/
+      # 可选:CORS 允许来源(默认空=不开放跨域;不要设成 *)
+      # MONITOR_CORS_ORIGIN: ""
+
+      # ── 2. 浏览器 / 指纹 ─────────────────────────────────────────────
+      # 无显示环境自动用 xvfb-run 启动浏览器批次;镜像已内置 Xvfb,保持 auto
+      GROK_USE_XVFB: "auto"
+      # 指纹目标系统:默认 windows,Linux 容器内也按 Windows 对齐 UA/字体/WebGL
+      # GROK_BROWSER_OS: "windows"     # windows | macos | linux
+      # 默认有头(跑在 Xvfb 虚拟屏,更接近真实环境);1=无头,省资源但更易被检测
+      # GROK_HEADLESS: "0"
+      # 1=强制有头(仅 Windows 本机调试需要,容器内无需设置)
+      # GROK_HEADED: "0"
+      # CPA 导出与质量探测的 x-grok-client-version(2026-10-22 后注册需 >= 1.0.13)
+      # GROK_CLIENT_VERSION: "1.0.13"
+
+      # ── 3. 重试与恢复 ────────────────────────────────────────────────
+      # 批量子进程连续无输出多少秒后重建(最小 60)
+      # GROK_BATCH_IDLE_TIMEOUT: "360"
+      # 驱动崩溃/卡死时单批最多自动恢复次数
+      # GROK_BATCH_MAX_RESTARTS: "2"
+      # 同一代理的浏览器启动尝试次数(1-4)
+      # GROK_BROWSER_START_ATTEMPTS: "2"
+      # 启动失败后最多更换代理数(0-10)
+      # GROK_PROXY_BOOT_ROTATIONS: "3"
+      # 单账号槽位软失败重试次数(0-3)
+      # GROK_SLOT_RETRIES: "1"
+      # 连续异常批次达到该值停止编排(1-10)
+      # GROK_ORCH_MAX_CONSECUTIVE_FAILURES: "2"
+
+      # ── 4. 代理池 ────────────────────────────────────────────────────
+      # 代理池状态文件(含凭据,0600);默认 /app/log/proxy_pool.json,
+      # 持久化在 ./data/log/,通常不用改
+      # PROXY_POOL_STATE_FILE: "/app/log/proxy_pool.json"
+      # 旧版纯文本代理文件路径(仅在未配置面板代理池时兼容读取)
+      # PROXY_POOL_LEGACY_FILE: "/app/proxies.txt"
+      # 网络异常短冷却 / 注册风控长冷却(秒)
+      # PROXY_NETWORK_COOLDOWN_SECONDS: "90"
+      # PROXY_RISK_COOLDOWN_SECONDS: "1800"
+      # 家宽换口:40 分钟(2400 秒)内没出现过的 IP 才复用
+      # PROXY_IP_FRESH_SECONDS: "2400"
+      # 家宽口(风控不冷却、不禁用):默认 8001-8011;覆盖时逗号分隔逐项列出
+      # PROXY_HOME_PORTS: "8001,8002,8003,8004,8005,8006,8007,8008,8009,8010,8011"
+      # 不参与注册选口的口:默认 7901-7920;覆盖时逗号分隔逐项列出
+      # PROXY_BLOCKED_PORTS: "7901,7902,7903,7904,7905,7906,7907,7908,7909,7910,7911,7912,7913,7914,7915,7916,7917,7918,7919,7920"
+
+      # ── 5. 邮箱 / 账号 ───────────────────────────────────────────────
+      # 面板邮箱 provider 配置文件;默认 /app/config.json,由 entrypoint 与
+      # ./data/config.json 同步,通常不要改
+      # EMAIL_PROVIDER_CONFIG_FILE: "/app/config.json"
+      # 邮箱域名池状态(0600);默认 ./data/log/email_domain_pool.json
+      # EMAIL_DOMAIN_POOL_STATE_FILE: "/app/log/email_domain_pool.json"
+      # 运行时 ASN 黑名单状态(0600);默认 ./data/log/blacklist_state.json
+      # BLACKLIST_STATE_FILE: "/app/log/blacklist_state.json"
+      # Inbucket 自建实例地址(config.json 的 inbucket_api_base 优先;此处为兜底)
+      # INBUCKET_API_BASE: ""
+      # Outlook RT 收信并发 / SSO 等待超时(秒,0=不限制)
+      # OUTLOOK_RT_CODE_WAIT_CONCURRENCY: "3"
+      # SSO_WAIT_TIMEOUT: "0"
+
+      # ── 6. 静态缓存 / 日志 / 目录 ────────────────────────────────────
+      # 面板启动的任务会自动开启静态资源缓存,这里通常不用设;
+      # 显式 0 可关闭,命令行直启需要手动设 1
+      # GROK_STATIC_ASSET_CACHE: "1"
+      # 缓存目录(0700)与上限 MB(最低 32)
+      # GROK_STATIC_CACHE_DIR: "/app/log/static-asset-cache"
+      # GROK_STATIC_CACHE_MAX_MB: "1024"
+      # 面板跟踪的批次日志;默认自动发现最新 log/batch*.log
+      # BATCH_LOG: "/app/log/batch.log"
+      # CPA / Grok2API auth 输出目录;默认已在 /app 下并持久化,通常不用改。
+      # 注意:Grok2API 输出目录由 ./data/config.json 的 grok2api_auth_dir 决定
+      # (SSO→auth 转换脚本按 config 写入);GROK2API_AUTH_DIR 只影响面板统计、
+      # BFS 检测与降智扫描的目录,两者建议保持一致
       # CPA_AUTH_DIR: "/app/cpa_auth"
+      # GROK2API_AUTH_DIR: "/app/grok2api_auth"
+
+      # ── 7. 容器内不建议修改 ──────────────────────────────────────────
+      # GROK_PYTHON_BIN:不设;面板自动使用镜像内 Python 启动批次
+      # PLAYWRIGHT_NODEJS_PATH / GROK_PLAYWRIGHT_NODE:不设;运行时自动解析系统 Node
+      # GROK_COMPAT_PROCESS_ROOTS:不设;容器内只有一个 release,无旧进程兼容需求
+      # GROK_BATCH_ID / GROK_BATCH_PROGRESS_FILE / GROK_BATCH_TRAFFIC_FILE /
+      # GROK_BATCH_TRAFFIC_HISTORY_FILE:面板启动批次时自动注入,不要手动设置
+      # ORCH_BASE_CPA / ORCH_ADD_COUNT:仅直接运行 run_until_100.py 时的默认值,
+      # 面板启动多轮编排会显式传入数量,无需设置
+      # 桌面 GUI / 开发脚本专用,容器部署不适用:
+      #   grok_register_ttk.py:SIGNUP_SUBMIT_GAP_SECONDS、TK_SILENCE_DEPRECATION、
+      #     CLOUDMAIL_URL / CLOUDMAIL_ADMIN_EMAIL / CLOUDMAIL_PASSWORD(凭据)、
+      #     MOEMAIL_API_BASE / MOEMAIL_API_URL / MOEMAIL_API_KEY(凭据)
+      #   scripts/run_xvfb_smoke.py:REGISTER_WORKERS
+      #   上述 provider 凭据请写在 ./data/config.json(或面板 UI),不要放进 compose
     volumes:
       # 唯一数据挂载点:首次启动自动创建 ./data 及其子目录
       - ./data:/app/data
