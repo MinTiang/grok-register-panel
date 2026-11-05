@@ -21,6 +21,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 DEFAULT_TIMEOUT = 30
+IMPORT_TIMEOUT = 60  # web/import 是 SSE 流，syncing 阶段可达 30s+
 _TOKEN_TTL_SECONDS = 14 * 60  # accessToken 有效期 15 分钟，提前 1 分钟复用
 
 
@@ -222,22 +223,36 @@ def push_sso(
             f"\r\n--{boundary}--\r\n".encode("utf-8"),
         ]
     )
-    resp = http_post(
-        f"{base}/api/admin/v1/accounts/web/import",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-        data=body,
-        timeout=timeout,
-        proxies={"http": proxy, "https": proxy} if proxy else None,
-        impersonate="chrome",
-    )
-    if resp.status_code in (401, 403):
-        raise Grok2ApiPushError(f"grok2api 管理会话无效 HTTP {resp.status_code}")
-    if resp.status_code >= 400:
-        raise Grok2ApiPushError(f"grok2api 导入请求失败 HTTP {resp.status_code}: {_redact(resp.text)}")
-    result = parse_import_sse(resp.text or "")
+    result: Optional[Dict[str, Any]] = None
+    last_error = ""
+    # 导入是幂等的（服务端按 sso token 哈希去重），超时/网络错误可安全重试一次
+    for attempt in range(2):
+        try:
+            resp = http_post(
+                f"{base}/api/admin/v1/accounts/web/import",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                },
+                data=body,
+                timeout=max(timeout, IMPORT_TIMEOUT),
+                proxies={"http": proxy, "https": proxy} if proxy else None,
+                impersonate="chrome",
+            )
+        except Exception as exc:
+            last_error = f"grok2api 导入请求失败: {_redact(exc)}"
+            if attempt < 1:
+                time.sleep(3)
+                continue
+            raise Grok2ApiPushError(last_error) from exc
+        if resp.status_code in (401, 403):
+            raise Grok2ApiPushError(f"grok2api 管理会话无效 HTTP {resp.status_code}")
+        if resp.status_code >= 400:
+            raise Grok2ApiPushError(f"grok2api 导入请求失败 HTTP {resp.status_code}: {_redact(resp.text)}")
+        result = parse_import_sse(resp.text or "")
+        break
+    if result is None:
+        raise Grok2ApiPushError(last_error or "grok2api 导入失败")
     if result["ok"] and not result["message"] and result.get("syncFailed"):
         result["message"] = f"web 池已入池，console 同步失败 {result['syncFailed']}（不影响使用）"
     return result
