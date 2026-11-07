@@ -182,6 +182,36 @@ def test_registration_wiring_present():
     assert "grok2api_push_enabled" in example
 
 
+
+def test_push_decoupled_from_cpa_conversion():
+    """推送必须在 CPA token 转换之前触发，且不再挂在 add_sso_to_cpa 内部。"""
+    ttk = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    assert "def push_sso_to_grok2api(" in ttk
+    # 三处注册成功点都独立调用
+    assert ttk.count("push_sso_to_grok2api(sso, email=email") >= 3
+    # add_sso_to_cpa 内部不应再有旧触发（避免重复推送）
+    body = ttk.split("def add_sso_to_cpa(", 1)[1].split("def ", 1)[0]
+    assert "_grok2api_push_if_enabled(" not in body
+    # 推送台账
+    assert "_g2a_push_ledger_mark(" in ttk
+
+
+def test_recovery_push_independent_of_token():
+    src = (ROOT / "sso_to_auth_json.py").read_text(encoding="utf-8")
+    assert "_push_sso_independent(" in src
+    loop = src.split("for i, record in enumerate(records, 1):", 1)[1]
+    first_push = loop.find("_push_sso_independent(")
+    first_state = loop.find("inspect_sso_account_state(", first_push)
+    assert first_push >= 0 and first_state > first_push, "推送应在风控/token 转换之前"
+
+
+def test_backfill_script_exists():
+    path = ROOT / "scripts/push_existing_sso.py"
+    assert path.is_file()
+    src = path.read_text(encoding="utf-8")
+    assert "load_sso_accounts" in src and "--dry-run" in src
+
+
 if __name__ == "__main__":
     test_build_import_document()
     test_parse_import_sse()
@@ -189,4 +219,7 @@ if __name__ == "__main__":
     test_push_settings_store_roundtrip()
     test_login_token_cache_reuse()
     test_registration_wiring_present()
+    test_push_decoupled_from_cpa_conversion()
+    test_recovery_push_independent_of_token()
+    test_backfill_script_exists()
     print("OK grok2api push")

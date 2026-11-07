@@ -1045,11 +1045,51 @@ def _append_sso_pending(email: str, sso: str, log_callback=None):
             log_callback(f"[CPA] 写入 sso_pending 失败: {exc}")
 
 
-def _grok2api_push_if_enabled(email, sso, record, proxy, log_callback=None):
-    """注册成功后按开关把 SSO 推送到 grok2api 的 Grok Web 账号池。
+def _g2a_push_ledger_path():
+    return accounts_side_file("g2a_pushed.json")
 
-    grok2api_push_only_clean 开启时先做一次实时降智短测：
-    verdict != healthy（降智/风控/失败）的号不推送。推送失败不影响注册结果。
+
+def _g2a_push_ledger_load():
+    """推送台账：{email: {status, ts, detail}}，用于防重复推送与漏推审计。"""
+    import json as _json
+
+    path = _g2a_push_ledger_path()
+    try:
+        data = _json.loads(Path(path).read_text(encoding="utf-8") or "{}")
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _g2a_push_ledger_mark(email, status, detail=""):
+    import json as _json
+    from datetime import datetime, timezone
+
+    addr = str(email or "").strip().lower()
+    if not addr:
+        return
+    path = _g2a_push_ledger_path()
+    try:
+        with exclusive_file_lock(str(path) + ".lock"):
+            data = _g2a_push_ledger_load()
+            data[addr] = {
+                "status": str(status or ""),
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "detail": redact_sensitive_log_line(str(detail or ""))[:160],
+            }
+            atomic_write_json(path, data)
+    except Exception:
+        pass
+
+
+def _grok2api_push_if_enabled(email, sso, record, proxy, log_callback=None, *, allow_dedup=True):
+    """按开关把 SSO 推送到 grok2api 的 Grok Web 账号池。
+
+    与 CPA/Grok2API 本地写入解耦：只要拿到 sso 就会尝试推送，
+    不受 token 换取结果、bfs 过滤、cpa_auto_add 开关影响（这些只影响本地 auth 写入）。
+
+    grok2api_push_only_clean 开启时先做降智短测：verdict != healthy 的不推送。
+    allow_dedup=True 时查本地台账，已成功推送过的号不重复推。
     """
     if not sso or not _g2a_push_enabled():
         return
@@ -1057,12 +1097,19 @@ def _grok2api_push_if_enabled(email, sso, record, proxy, log_callback=None):
     user = str(config.get("grok2api_push_username") or "").strip()
     pwd = str(config.get("grok2api_push_password") or "")
     if not base or not user or not pwd:
-        log_callback("[推送] grok2api 推送已启用但 URL/用户名/密码不完整，跳过")
+        if log_callback:
+            log_callback("[推送] grok2api 推送已启用但 URL/用户名/密码不完整，跳过")
         return
 
     def _log(msg: str) -> None:
         if log_callback:
             log_callback(msg)
+
+    if allow_dedup:
+        prev = _g2a_push_ledger_load().get(str(email or "").strip().lower()) or {}
+        if prev.get("status") == "ok":
+            _log(f"[推送] 台账已记录推送成功（{prev.get('ts')}），跳过重复推送")
+            return
 
     if _g2a_push_only_clean():
         verdict = ""
@@ -1083,6 +1130,7 @@ def _grok2api_push_if_enabled(email, sso, record, proxy, log_callback=None):
                 reason = redact_sensitive_log_line(str(probe_exc))[:120]
         if verdict != "healthy":
             _log(f"[推送] 跳过 grok2api 推送：降智检测未通过（{reason}）")
+            _g2a_push_ledger_mark(email, "skipped_degraded", reason)
             return
         _log(f"[推送] 降智检测通过（{reason}），继续推送")
 
@@ -1102,12 +1150,16 @@ def _grok2api_push_if_enabled(email, sso, record, proxy, log_callback=None):
                 f"（created={result.get('created', 0)} updated={result.get('updated', 0)}"
                 f" skipped={result.get('skipped', 0)}）"
             )
+            _g2a_push_ledger_mark(email, "ok", f"created={result.get('created', 0)}")
         else:
             _log(f"[推送] grok2api 推送未生效: {result.get('message')}")
+            _g2a_push_ledger_mark(email, "failed", result.get("message"))
     except Grok2ApiPushError as push_exc:
         _log(f"[推送] grok2api 推送失败: {redact_sensitive_log_line(str(push_exc))}")
+        _g2a_push_ledger_mark(email, "failed", str(push_exc))
     except Exception as push_exc:
         _log(f"[推送] grok2api 推送异常: {redact_sensitive_log_line(str(push_exc))}")
+        _g2a_push_ledger_mark(email, "failed", str(push_exc))
 
 
 def _append_sso_risk_rejected(email: str, sso: str, details: str, log_callback=None):
@@ -1196,6 +1248,21 @@ def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
     }
 
 
+def push_sso_to_grok2api(sso, email="", record=None, proxy="", log_callback=None, *, allow_dedup=True):
+    """注册拿到 SSO 后的独立推送入口（不依赖 CPA/Grok2API token 转换）。
+
+    注册主流程在保存账号文件后立即调用；SSO 换 token 失败、bfs 过滤、
+    cpa_auto_add 关闭等分支都不再影响推送。
+    """
+    try:
+        _grok2api_push_if_enabled(
+            email, sso, record, proxy, log_callback=log_callback, allow_dedup=allow_dedup
+        )
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[推送] 推送入口异常: {redact_sensitive_log_line(str(exc))}")
+
+
 def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
     """SSO → Device Flow（失败回退授权码）换 token → 写入 CPA / Grok2API。
 
@@ -1232,7 +1299,6 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
     if not sso:
         return False
     proxy = _resolve_cpa_proxy()
-
     def _cpa_log(message):
         if log_callback:
             log_callback(f"[CPA] {str(message).strip()}")
@@ -4140,6 +4206,8 @@ class GrokRegisterGUI:
                             self.results.append({"email": email, "sso": sso, "profile": profile})
                     else:
                         self.results.append({"email": email, "sso": sso, "profile": profile})
+                    # 拿到 SSO 立即推送 grok2api（不依赖 CPA token 转换）
+                    push_sso_to_grok2api(sso, email=email, proxy=_resolve_cpa_proxy(), log_callback=wlog)
                     cpa_ok = add_sso_to_cpa(sso, email=email, log_callback=wlog)
                     self._record_success()
                     retry_count_for_slot = 0
@@ -4485,6 +4553,8 @@ def run_registration_cli(count):
                                 log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
                             )
                             raise RuntimeError(f"保存账号文件失败: {file_exc}") from file_exc
+                        # 拿到 SSO 立即推送 grok2api（不依赖 CPA token 转换）
+                        push_sso_to_grok2api(sso, email=email, proxy=_resolve_cpa_proxy(), log_callback=wlog)
                         cpa_ok = add_sso_to_cpa(
                             sso, email=email, log_callback=lambda m: cli_log(f"[W{wid+1}] {m}")
                         )
@@ -4889,6 +4959,8 @@ def run_registration_cli(count):
                     cli_log(f"[!] 保存账号文件失败，当前账号不计为成功: {file_exc}")
                     _append_sso_pending(email, sso, log_callback=cli_log)
                     raise RuntimeError(f"保存账号文件失败: {file_exc}") from file_exc
+                # 拿到 SSO 立即推送 grok2api（不依赖 CPA token 转换）
+                push_sso_to_grok2api(sso, email=email, proxy=_resolve_cpa_proxy(), log_callback=cli_log)
                 cpa_ok = add_sso_to_cpa(sso, email=email, log_callback=cli_log)
                 success_count += 1
                 mark_successful_account()

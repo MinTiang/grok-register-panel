@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.10.0 - 2026-11-07
+
+### Fixed
+
+- **修复 grok2api 漏推**：推送原先只在 CPA token 转换成功后触发，导致 SSO 换 token 失败、`bfs_skip_cpa` 过滤、`cpa_auto_add=false`、风控拒绝等分支的号全部漏推。现在推送与 CPA/Grok2API 本地写入**完全解耦**：注册主流程拿到 SSO 保存账号文件后立即推送（三个成功点），补录流程在风控检查与 token 转换之前推送。
+- 推送新增本地台账 `accounts/g2a_pushed.json`（`email → status/ts/detail`），成功推送的号自动去重，避免重复推送与漏推无法审计。
+
+### Added
+
+- `scripts/push_existing_sso.py`：把本地 `accounts/*.txt` 中未推送的 SSO 批量补推到 grok2api，支持 `--dry-run` / `--limit`，自动跳过服务端已存在的号。
+
 ## 0.9.0 - 2026-11-06
 
 ### Added
