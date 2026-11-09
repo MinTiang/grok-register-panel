@@ -298,6 +298,43 @@ def test_grok_ttk_wiring_present():
     assert '"outlook_pool"' in store
 
 
+
+def test_since_time_uses_server_lease_not_local_clock():
+    """生产实证：本机时钟偏差导致新邮件被过滤 -> 超时。阈值必须以服务端租约为准。"""
+    claim = {
+        "account_id": 1, "email": "a@outlook.com", "claim_token": "t",
+        "lease_expires_at": "2026-11-07T14:51:54Z", "lease_seconds": 1800,
+        "project_key": "grok",
+    }
+    tok = provider.pack_claim(claim, "a+x@outlook.com", "plus")
+    data = provider.unpack_claim(tok)
+    assert data["lease_expires_at"] == "2026-11-07T14:51:54Z"
+    assert data["lease_seconds"] == 1800
+    assert provider._SINCE_SKEW_SECONDS >= 600  # 容忍度放宽到 10 分钟
+
+
+def test_wait_for_code_relaxes_time_filter_when_all_filtered():
+    """所有邮件都被时间过滤挡下时，应放宽过滤重试而不是直接超时。"""
+    old_mail = {
+        "id": "m1", "subject": "Grok confirmation code: 111-222",
+        "date": "2026-01-01T00:00:00Z", "body_preview": "code",
+    }
+    state = {"n": 0}
+
+    def get(url, headers=None, timeout=None):
+        state["n"] += 1
+        return FakeResp(200, {"success": True, "emails": [old_mail]})
+
+    claim = {"account_id": 1, "claim_token": "t", "email": "a@outlook.com", "claimed_at": 0.0}
+    tok = provider.pack_claim(claim, "a@outlook.com", "primary")
+    code = provider.wait_for_code(
+        get, "https://olp.example.com", "k", tok, "a@outlook.com",
+        timeout=40, poll_interval=1, extract_code=extract_verification_code,
+    )
+    assert code == "111-222"
+    assert state["n"] >= 2  # 第一次被过滤，放宽后第二次命中
+
+
 if __name__ == "__main__":
     test_alias_modes()
     test_claim_pack_roundtrip_and_registry()
@@ -308,5 +345,7 @@ if __name__ == "__main__":
     test_wait_for_code_timeout()
     test_store_provider_config()
     test_connectivity_precheck()
+    test_since_time_uses_server_lease_not_local_clock()
+    test_wait_for_code_relaxes_time_filter_when_all_filtered()
     test_grok_ttk_wiring_present()
     print("OK outlook pool")

@@ -24,7 +24,7 @@ DEFAULT_POLL_INTERVAL = 4
 DEFAULT_RESEND_INTERVAL = 60
 _ALIAS_TAG_ALPHABET = string.ascii_lowercase + string.digits
 ALIAS_MODES = ("plus", "configured", "primary")
-_SINCE_SKEW_SECONDS = 120  # 服务端/本地时钟偏移容忍
+_SINCE_SKEW_SECONDS = 600  # 服务端/本地时钟偏移容忍（VPS 未同步 NTP 时可达数分钟）
 
 HttpGet = Callable[..., Any]
 HttpPost = Callable[..., Any]
@@ -165,6 +165,7 @@ def claim_mailbox(
         "email": str(data.get("email") or "").strip(),
         "claim_token": str(data.get("claim_token") or ""),
         "lease_expires_at": str(data.get("lease_expires_at") or ""),
+        "lease_seconds": max(60, int(lease_seconds or DEFAULT_LEASE_SECONDS)),
         "project_key": project,
     }
     if not claim["email"] or not claim["account_id"]:
@@ -322,6 +323,9 @@ def pack_claim(claim: Dict[str, Any], email_used: str, alias_mode: str) -> str:
         "email_used": str(email_used or ""),
         "alias_mode": str(alias_mode or "plus"),
         "claimed_at": time.time(),
+        # 服务端租约时间：用于反推真实领取时刻，抵消本机时钟偏差
+        "lease_expires_at": str(claim.get("lease_expires_at") or ""),
+        "lease_seconds": int(claim.get("lease_seconds") or DEFAULT_LEASE_SECONDS),
     }
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii")
@@ -363,11 +367,20 @@ def wait_for_code(
         raise OutlookPoolError("缺少收信地址，无法拉取验证码")
     base = normalize_base(base_url)
     key = str(api_key or "").strip()
-    since_ts = float(claim.get("claimed_at") or 0.0) - _SINCE_SKEW_SECONDS
+    # 以服务端租约时间反推领取时刻，避免本机时钟偏差把新邮件过滤掉；
+    # 拿不到 lease_expires_at 时退回本地时间（放宽容忍 10 分钟）。
+    since_ts = 0.0
+    lease_ts = _parse_email_date(claim.get("lease_expires_at"))
+    if lease_ts:
+        lease_seconds = float(claim.get("lease_seconds") or DEFAULT_LEASE_SECONDS)
+        since_ts = lease_ts - lease_seconds - _SINCE_SKEW_SECONDS
+    if not since_ts:
+        since_ts = float(claim.get("claimed_at") or 0.0) - _SINCE_SKEW_SECONDS
     deadline = time.time() + max(30, int(timeout or 0))
     interval = max(2, int(poll_interval or DEFAULT_POLL_INTERVAL))
     next_resend_at = time.time() + max(20, int(resend_interval or DEFAULT_RESEND_INTERVAL))
     seen_ids: set = set()
+    relaxed = False  # 过滤后一直没命中时，放宽时间过滤再试
 
     def _log(message: str) -> None:
         if log_callback:
@@ -391,13 +404,15 @@ def wait_for_code(
                 sleep_with_cancel(interval, cancel_callback)
             continue
         fresh = 0
+        filtered = 0
         for mail in mails:
             mail_id = str(mail.get("id") or f"{mail.get('date')}-{mail.get('subject')}")
             if mail_id in seen_ids:
                 continue
             seen_ids.add(mail_id)
             mail_ts = _parse_email_date(mail.get("date"))
-            if since_ts and mail_ts and mail_ts < since_ts:
+            if since_ts and mail_ts and mail_ts < since_ts and not relaxed:
+                filtered += 1
                 continue  # 领取前的旧邮件
             fresh += 1
             subject = str(mail.get("subject") or "")
@@ -406,6 +421,12 @@ def wait_for_code(
             if code:
                 _log(f"[*] 收到验证码邮件: {subject[:60]}")
                 return code
+        if filtered and not fresh and not relaxed:
+            # 全部被时间过滤挡掉：可能是本机时钟比邮件服务器快，放宽后再试
+            relaxed = True
+            seen_ids.clear()  # 已被跳过的邮件需要重新检查
+            _log(f"[Debug] {filtered} 封邮件被时间过滤挡下，已放宽时间限制重试")
+            continue
         if fresh and log_callback:
             _log(f"[Debug] outlookEmail 本轮新邮件 {fresh} 封，尚未匹配到验证码")
         if sleep_with_cancel:
