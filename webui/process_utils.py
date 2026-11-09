@@ -28,6 +28,11 @@ PROCESS_ERRORS = (psutil.Error, OSError, TypeError, ValueError)
 
 
 def _process_snapshot(process) -> dict | None:
+    """Build a process snapshot.
+
+    ``cwd`` / ``create_time`` are optional: callers doing a cheap first-pass
+    scan only preload ``pid`` / ``cmdline`` and fill the rest for candidates.
+    """
     try:
         info = getattr(process, "info", None)
         if not isinstance(info, dict):
@@ -36,12 +41,14 @@ def _process_snapshot(process) -> dict | None:
                 ad_value=None,
             )
         pid = int(info.get("pid"))
-        cwd_value = info.get("cwd")
         cmdline_value = info.get("cmdline")
-        if not cwd_value or not isinstance(cmdline_value, (list, tuple)):
+        if not isinstance(cmdline_value, (list, tuple)):
             return None
-        cwd = Path(str(cwd_value)).resolve()
         cmdline = [str(part) for part in cmdline_value if str(part)]
+        if not cmdline:
+            return None
+        cwd_value = info.get("cwd")
+        cwd = Path(str(cwd_value)).resolve() if cwd_value else None
         created = info.get("create_time")
         create_time = float(created) if created is not None else None
         return {
@@ -73,11 +80,17 @@ def _snapshot_matches(
 ) -> bool:
     project_root = Path(root).resolve()
     process_cwd = snapshot.get("cwd")
-    if process_cwd != project_root:
+    if not process_cwd:
+        return False  # fail closed：无法确认工作目录时不认领
+    try:
+        cwd_path = Path(str(process_cwd)).resolve()
+    except OSError:
+        return False
+    if cwd_path != project_root:
         return False
     expected = {(project_root / name).resolve() for name in script_names}
     return any(
-        _resolved_arg(arg, process_cwd) in expected
+        _resolved_arg(arg, cwd_path) in expected
         for arg in snapshot.get("cmdline") or []
     )
 
@@ -110,23 +123,52 @@ def find_managed_processes(
     root: str | os.PathLike[str],
     script_names: tuple[str, ...] | list[str],
 ) -> list[dict]:
+    """Find project-owned processes.
+
+    两阶段扫描：先用 cmdline 廉价粗筛（脚本名必须出现在命令行里），
+    只对候选进程读取 cwd —— Windows 上遍历所有进程的 cwd 可达十几秒。
+    """
     found = []
     now = time.time()
     try:
+        # 只取 pid/cmdline（Windows 上 create_time 需逐个进程查询，全表可达数秒），
+        # cwd 与 create_time 都推迟到命中候选后按需读取
         iterator = psutil.process_iter(
-            attrs=("pid", "cwd", "cmdline", "create_time"),
+            attrs=("pid", "cmdline"),
             ad_value=None,
         )
         for process in iterator:
             snapshot = _process_snapshot(process)
-            if not snapshot or not _snapshot_matches(snapshot, root, script_names):
+            if not snapshot:
+                continue
+            # 阶段 1：命令行粗筛（不读 cwd/create_time，避免全表高开销扫描）
+            cmdline = snapshot.get("cmdline") or []
+            cmd_text = " ".join(str(part) for part in cmdline)
+            if not any(name in cmd_text for name in script_names):
+                continue
+            # 阶段 2：只对候选读取 cwd 与 create_time 并做精确匹配
+            try:
+                cwd = snapshot.get("cwd")
+                if not cwd:
+                    cwd_getter = getattr(process, "cwd", None)
+                    cwd = cwd_getter() if callable(cwd_getter) else None
+                created = snapshot.get("create_time")
+                if created is None:
+                    ct_getter = getattr(process, "create_time", None)
+                    created = ct_getter() if callable(ct_getter) else None
+            except PROCESS_ERRORS:
+                continue
+            if not cwd:
+                continue
+            snapshot["cwd"] = cwd
+            snapshot["create_time"] = created
+            if not _snapshot_matches(snapshot, root, script_names):
                 continue
             pid = snapshot["pid"]
             try:
                 pgid = os.getpgid(pid) if os.name == "posix" else None
             except OSError:
                 pgid = None
-            created = snapshot.get("create_time")
             etime = _format_elapsed(now - created) if created is not None else ""
             found.append(
                 {

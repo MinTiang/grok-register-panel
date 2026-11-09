@@ -1122,7 +1122,12 @@ def _grok2api_push_if_enabled(email, sso, record, proxy, log_callback=None, *, a
             try:
                 from quality_probe import probe_account  # 局部导入，避免常态加载
 
-                probed = probe_account(record if isinstance(record, dict) else {}, proxy=proxy or "")
+                probed = probe_account(
+                    record if isinstance(record, dict) else {},
+                    # 降智短测需要住宅/家宽出口；proxy 参数只影响探测出口，
+                    # 与推送到 grok2api 的连接方式无关（推送走直连）
+                    proxy=proxy or _resolve_cpa_proxy(),
+                )
                 verdict = str(probed.get("verdict") or "error")
                 reason = probed.get("error") or f"tps={probed.get('tps')}"
             except Exception as probe_exc:
@@ -4207,7 +4212,7 @@ class GrokRegisterGUI:
                     else:
                         self.results.append({"email": email, "sso": sso, "profile": profile})
                     # 拿到 SSO 立即推送 grok2api（不依赖 CPA token 转换）
-                    push_sso_to_grok2api(sso, email=email, proxy=_resolve_cpa_proxy(), log_callback=wlog)
+                    push_sso_to_grok2api(sso, email=email, proxy="", log_callback=wlog)
                     cpa_ok = add_sso_to_cpa(sso, email=email, log_callback=wlog)
                     self._record_success()
                     retry_count_for_slot = 0
@@ -4554,7 +4559,12 @@ def run_registration_cli(count):
                             )
                             raise RuntimeError(f"保存账号文件失败: {file_exc}") from file_exc
                         # 拿到 SSO 立即推送 grok2api（不依赖 CPA token 转换）
-                        push_sso_to_grok2api(sso, email=email, proxy=_resolve_cpa_proxy(), log_callback=wlog)
+                        push_sso_to_grok2api(
+                            sso,
+                            email=email,
+                            proxy="",
+                            log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
+                        )
                         cpa_ok = add_sso_to_cpa(
                             sso, email=email, log_callback=lambda m: cli_log(f"[W{wid+1}] {m}")
                         )
@@ -4960,7 +4970,7 @@ def run_registration_cli(count):
                     _append_sso_pending(email, sso, log_callback=cli_log)
                     raise RuntimeError(f"保存账号文件失败: {file_exc}") from file_exc
                 # 拿到 SSO 立即推送 grok2api（不依赖 CPA token 转换）
-                push_sso_to_grok2api(sso, email=email, proxy=_resolve_cpa_proxy(), log_callback=cli_log)
+                push_sso_to_grok2api(sso, email=email, proxy="", log_callback=cli_log)
                 cpa_ok = add_sso_to_cpa(sso, email=email, log_callback=cli_log)
                 success_count += 1
                 mark_successful_account()

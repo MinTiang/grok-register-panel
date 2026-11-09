@@ -54,10 +54,11 @@ from curl_cffi import requests
 from webui import grok2api_push
 
 
-def _push_sso_independent(config, email, sso, proxy, want_probe=False):
+def _push_sso_independent(config, email, sso, probe_proxy, want_probe=False):
     """补录流程的独立推送：拿到 SSO 立即推，不受 token 转换/风控结果影响。
 
-    只推送不写额外文件；降智过滤开启时做实时短测（want_probe 时复用标注）。
+    probe_proxy 只用于降智短测的家宽出口；推送到 grok2api 走直连
+    （管理后台流量不该绕住宅代理）。
     """
     try:
         if not grok2api_push.is_push_enabled(config):
@@ -66,7 +67,7 @@ def _push_sso_independent(config, email, sso, proxy, want_probe=False):
         if grok2api_push.push_only_clean(config):
             from quality_probe import probe_account as _probe_account
 
-            probed = _probe_account(record, proxy=proxy or "")
+            probed = _probe_account(record, proxy=probe_proxy or "")
             verdict = str(probed.get("verdict") or "error")
             print(f"  [推送] 实时降智短测 verdict={verdict} tps={probed.get('tps')}")
             if verdict != "healthy":
@@ -79,7 +80,7 @@ def _push_sso_independent(config, email, sso, proxy, want_probe=False):
             config.get("grok2api_push_password") or "",
             email,
             sso,
-            proxy=proxy or "",
+            proxy="",
         )
         if res.get("ok"):
             print(

@@ -309,8 +309,13 @@ def read_base():
         return 0
 
 
-def process_running():
-    """Detect orch and/or batch workers."""
+_PROC_CACHE_LOCK = threading.Lock()
+_PROC_CACHE = {"ts": 0.0, "value": None}
+_PROC_CACHE_TTL = 1.5  # 秒：面板 2s 轮询，缓存避免重复全表扫描
+
+
+def _process_running_uncached():
+    """Detect orch and/or batch workers (一次扫描同时匹配两类脚本)。"""
     info = {
         "running": False,
         "pid": None,
@@ -323,8 +328,15 @@ def process_running():
         "batch_pid": None,
         "batch_etime": None,
     }
-    orch = _find_managed_processes(("run_until_100.py",))
-    batch = _find_managed_processes(("run_batch_headless.py",))
+    # 一次进程表扫描收集候选，再按脚本名归类（cmdline 粗筛已足够便宜）
+    orch_names = ("run_until_100.py",)
+    batch_names = ("run_batch_headless.py",)
+    orch = _find_managed_processes(orch_names)
+    batch = [
+        item
+        for item in _find_managed_processes(batch_names)
+        if not any(name in (item.get("cmd") or "") for name in orch_names)
+    ]
 
     def primary(items):
         if not items:
@@ -351,6 +363,27 @@ def process_running():
             info["etime"] = batch_item.get("etime")
             info["cmd"] = batch_item.get("cmd")
     return info
+
+
+def process_running():
+    """带短 TTL 缓存的进程状态（面板 2s 轮询，全表扫描开销大）。"""
+    now = time.time()
+    with _PROC_CACHE_LOCK:
+        cached = _PROC_CACHE.get("value")
+        if cached is not None and now - float(_PROC_CACHE["ts"] or 0) < _PROC_CACHE_TTL:
+            return dict(cached)
+    info = _process_running_uncached()
+    with _PROC_CACHE_LOCK:
+        _PROC_CACHE["ts"] = now
+        _PROC_CACHE["value"] = dict(info)
+    return info
+
+
+def invalidate_process_cache():
+    """启动/停止任务后立即失效缓存，避免界面延迟。"""
+    with _PROC_CACHE_LOCK:
+        _PROC_CACHE["ts"] = 0.0
+        _PROC_CACHE["value"] = None
 
 
 def parse_log(path, max_tail=400_000):
@@ -687,6 +720,7 @@ def kill_all():
     killed = _terminate_managed_processes(
         ("run_until_100.py", "run_batch_headless.py")
     )
+    invalidate_process_cache()
     return {"ok": True, "killed": killed}
 
 
@@ -770,6 +804,7 @@ def _start_orch_unlocked():
     finally:
         stdout.close()
     write_pid_file(ORCH_PID, p.pid)
+    invalidate_process_cache()
     return {
         "ok": True,
         "pid": p.pid,
@@ -828,6 +863,7 @@ def _start_batch_only_unlocked():
     finally:
         fout.close()
     write_pid_file(BATCH_PID, p.pid)
+    invalidate_process_cache()
     return {
         "ok": True,
         "pid": p.pid,

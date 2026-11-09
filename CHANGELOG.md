@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.10.2 - 2026-11-10
+
+### Fixed
+
+- **修复推送调用 `NameError: name 'wlog' is not defined`**（v0.10.0 引入的回归，导致注册在推送环节全量失败）：`run_registration_cli` 作用域没有 `wlog`，改为该作用域实际可用的 `lambda m: cli_log(f"[W{wid+1}] {m}")`。新增 AST 静态检查测试，扫描所有推送调用点的 `log_callback` 变量是否在作用域内，防止同类回归。
+- **推送改直连**：注册与补录的推送此前复用 `_resolve_cpa_proxy()`（xAI 换 token 的住宅代理），让 grok2api 管理后台流量绕远路、增加失败率并消耗代理流量。现在推送走直连，降智短测仍单独使用住宅/家宽出口。
+
+### Performance
+
+- **进程发现从 8.3s 降到 0.2s（提升约 40 倍）**：面板每 2 秒轮询 `/api/status`，而 `psutil.process_iter` 请求 `create_time`（Windows 上 6.2s）与 `cwd`（17.1s）会遍历整张进程表。改为两阶段扫描——先只用 `pid`+`cmdline` 廉价粗筛，仅对命中候选读取 `cwd`/`create_time`。安全边界不变：仍按项目根目录精确匹配脚本路径，无法确认 cwd 时 fail-closed。
+- `process_running()` 加 1.5 秒 TTL 缓存（面板 2s 轮询），启动/停止任务后立即失效；`_snapshot_matches` 统一 `Path.resolve()` 比较，修复 `proc.cwd()` 返回 `str` 时 Windows 上永不相等的问题。
+
 ## 0.10.1 - 2026-11-09
 
 ### Fixed

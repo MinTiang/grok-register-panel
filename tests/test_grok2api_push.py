@@ -188,7 +188,7 @@ def test_push_decoupled_from_cpa_conversion():
     ttk = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
     assert "def push_sso_to_grok2api(" in ttk
     # 三处注册成功点都独立调用
-    assert ttk.count("push_sso_to_grok2api(sso, email=email") >= 3
+    assert len([l for l in ttk.splitlines() if "push_sso_to_grok2api(" in l and "def " not in l]) >= 3
     # add_sso_to_cpa 内部不应再有旧触发（避免重复推送）
     body = ttk.split("def add_sso_to_cpa(", 1)[1].split("def ", 1)[0]
     assert "_grok2api_push_if_enabled(" not in body
@@ -212,6 +212,65 @@ def test_backfill_script_exists():
     assert "load_sso_accounts" in src and "--dry-run" in src
 
 
+
+def test_push_call_sites_have_no_undefined_log_callback():
+    """生产事故回归：插入的推送调用用了作用域外的 wlog，导致 NameError 全量失败。"""
+    import ast
+    import builtins
+
+    src = (ROOT / "grok_register_ttk.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    module_names = set(dir(builtins))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_names.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            module_names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                module_names.add((alias.asname or alias.name).split(".")[0])
+
+    errors = []
+
+    class Checker(ast.NodeVisitor):
+        def __init__(self):
+            self.scopes = []
+
+        def visit_FunctionDef(self, node):
+            bound = {a.arg for a in node.args.args + node.args.kwonlyargs + node.args.posonlyargs}
+            if node.args.vararg:
+                bound.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                bound.add(node.args.kwarg.arg)
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Store):
+                    bound.add(inner.id)
+                elif isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    bound.add(inner.name)
+            self.scopes.append(bound)
+            self.generic_visit(node)
+            self.scopes.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in (
+                "push_sso_to_grok2api", "_grok2api_push_if_enabled"
+            ):
+                keywords = {kw.arg: kw.value for kw in node.keywords}
+                callback = keywords.get("log_callback")
+                if isinstance(callback, ast.Name):
+                    name = callback.id
+                    local = any(name in scope for scope in self.scopes)
+                    if not local and name not in module_names:
+                        errors.append(f"line {node.lineno}: log_callback={name} 未定义")
+            self.generic_visit(node)
+
+    Checker().visit(tree)
+    assert not errors, "推送调用存在未定义变量: " + "; ".join(errors)
+
+
 if __name__ == "__main__":
     test_build_import_document()
     test_parse_import_sse()
@@ -222,4 +281,5 @@ if __name__ == "__main__":
     test_push_decoupled_from_cpa_conversion()
     test_recovery_push_independent_of_token()
     test_backfill_script_exists()
+    test_push_call_sites_have_no_undefined_log_callback()
     print("OK grok2api push")
