@@ -60,5 +60,7 @@
   "outlook_pool_alias_mode": "plus",
   "inbucket_api_base": "",
   "inbucket_domain": "",
-  "inbucket_random_levels": "0"
+  "inbucket_random_levels": "0",
+  "outlook_pool_code_timeout": 150,
+  "mail_code_retry": 2
 }

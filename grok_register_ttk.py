@@ -256,6 +256,9 @@ DEFAULT_CONFIG = {
     "outlook_pool_api_key": "",
     "outlook_pool_project": "grok",
     "outlook_pool_alias_mode": "plus",
+    # 验证码等待上限（秒）与收不到码时换新邮箱的重试次数
+    "outlook_pool_code_timeout": 150,
+    "mail_code_retry": 2,
     # grok2api SSO 推送（可开关）：注册/补录成功后把 sso cookie 推到 grok2api 的 Grok Web 池
     "grok2api_push_enabled": False,
     "grok2api_push_url": "",
@@ -2186,6 +2189,19 @@ def get_outlook_pool_alias_mode():
     return mode if mode in outlook_pool_provider.ALIAS_MODES else "plus"
 
 
+def get_outlook_pool_code_timeout(default: int = 150, minimum: int = 60, maximum: int = 600) -> int:
+    """验证码等待上限（秒）。
+
+    实测大多数邮件在 60s 内到达；超过 ~150s 仍未到的基本不会再来，
+    过长的等待会白占账号槽位。可用 outlook_pool_code_timeout 覆盖。
+    """
+    try:
+        value = int(config.get("outlook_pool_code_timeout", default) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
 _OUTLOOK_POOL_ALIASES_CACHE = {"ts": 0.0, "map": {}}
 
 
@@ -2350,7 +2366,7 @@ def get_oai_code(
             get_outlook_pool_key(),
             dev_token,
             email,
-            timeout=max(int(timeout or 0), 240),
+            timeout=max(int(timeout or 0), get_outlook_pool_code_timeout()),
             poll_interval=max(3, int(poll_interval or 4)),
             extract_code=extract_verification_code,
             log_callback=log_callback,
@@ -4495,9 +4511,12 @@ def run_registration_cli(count):
                 i = 0
                 retry = 0
                 worker_stop = False
+                # 验证码超时后换新邮箱重试的次数（不含首次尝试）
+                _mail_retry_limit = max(0, min(int(config.get("mail_code_retry", 2) or 0), 5))
                 while i < n and not controller.should_stop() and not worker_stop:
                     email = ""
                     registration_submitted = False
+                    _mail_try = 0
                     try:
                         delay = reserve_signup_submit_slot()
                         if delay >= 0.5:
@@ -4505,20 +4524,47 @@ def run_registration_cli(count):
                                 f"[W{wid+1}] [*] 错开提交 {delay:.0f}s，避免同时打验证码"
                             )
                             sleep_with_cancel(delay, controller.should_stop)
-                        open_signup_page(
-                            log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
-                            cancel_callback=controller.should_stop,
-                        )
-                        email, dev_token = fill_email_and_submit(
-                            log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
-                            cancel_callback=controller.should_stop,
-                        )
-                        code = fill_code_and_submit(
-                            email,
-                            dev_token,
-                            log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
-                            cancel_callback=controller.should_stop,
-                        )
+                        # 验证码阶段失败（收不到码）时换新邮箱重来，不消耗账号槽位
+                        while True:
+                            open_signup_page(
+                                log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
+                                cancel_callback=controller.should_stop,
+                            )
+                            email, dev_token = fill_email_and_submit(
+                                log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
+                                cancel_callback=controller.should_stop,
+                            )
+                            try:
+                                code = fill_code_and_submit(
+                                    email,
+                                    dev_token,
+                                    log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
+                                    cancel_callback=controller.should_stop,
+                                )
+                                break
+                            except Exception as mail_exc:
+                                msg = str(mail_exc)
+                                code_failed = (
+                                    "验证码" in msg
+                                    or "未收到验证码" in msg
+                                    or "code_timeout" in msg.lower()
+                                )
+                                if code_failed and _mail_try < _mail_retry_limit:
+                                    _mail_try += 1
+                                    cli_log(
+                                        f"[W{wid+1}] [!] 本邮箱未收到验证码"
+                                        f"（{redact_sensitive_log_line(msg)[:90]}），"
+                                        f"换新邮箱重试 {_mail_try}/{_mail_retry_limit}"
+                                    )
+                                    try:
+                                        restart_browser(
+                                            log_callback=lambda m: cli_log(f"[W{wid+1}] {m}")
+                                        )
+                                    except Exception:
+                                        pass
+                                    sleep_with_cancel(1, controller.should_stop)
+                                    continue
+                                raise
                         # From here an account may exist even if the browser,
                         # SSO polling, or local output later fails. Keep it used.
                         registration_submitted = True
