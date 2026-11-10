@@ -40,6 +40,7 @@ try:
         read_proxy_pool,
         start_proxy_tests,
         update_proxy,
+        worker_proxy_details,
     )
     from webui.email_domain_store import (
         delete_domain,
@@ -400,6 +401,7 @@ def parse_log(path, max_tail=400_000):
     ok = fail = domain = skip = bot0 = bot1 = bfs_hits = 0
     count = workers = None
     ended = None
+    last_alert = None
     recent_ok = []
     recent_fail = []
     fail_kinds = {}
@@ -413,6 +415,9 @@ def parse_log(path, max_tail=400_000):
         m = RE_END.search(line)
         if m:
             ended = {"success": int(m.group(1)), "fail": int(m.group(2))}
+        # 记录最后一条停止/告警原因（预检失败、没有可用代理等），供 UI 展示
+        if "[!] " in line or line.startswith("[-] "):
+            last_alert = line.strip()
 
         if RE_OK.search(line):
             ok += 1
@@ -479,6 +484,7 @@ def parse_log(path, max_tail=400_000):
         "bot1": bot1,
         "bfs": bfs_hits,
         "ended": ended,
+        "last_alert": last_alert,
         "fail_kinds": fail_kinds,
         "worker_ok": worker_ok,
         "worker_fail": worker_fail,
@@ -735,6 +741,51 @@ def _runtime_prerequisite_error() -> str | None:
     return None
 
 
+def _ensure_healthy_proxies(wait_seconds: int = 60) -> str | None:
+    """启动前确保面板代理池有健康出口。
+
+    池里有条目但全部冷却/未探活时，自动触发一次探活并等待恢复，
+    避免批次启动后立刻因「没有可用代理」整批失败（用户在 UI 上只看到
+    自动停止，原因藏在日志里）。池子为空（未配置面板池）则不拦。
+    """
+    try:
+        from webui.proxy_store import worker_proxy_details as _wpd
+    except Exception:
+        return None
+
+    def _has_usable() -> bool:
+        try:
+            return bool(_wpd() or [])
+        except Exception:
+            return False
+
+    if _has_usable():
+        return None
+
+    pool = read_proxy_pool()
+    items = pool.get("items") or []
+    if not items:
+        return None  # 未使用面板池（走 config.proxy 兜底），不拦
+    if not any(item.get("enabled") for item in items):
+        return "面板代理池的所有条目都被停用，请先在「代理池」启用"
+
+    # 触发全量探活并等待恢复（最多 wait_seconds 秒）
+    try:
+        ids = [item.get("id") for item in items]
+        start_proxy_tests(ids)
+    except Exception:
+        pass
+    deadline = time.time() + max(0, int(wait_seconds))
+    while time.time() < deadline:
+        time.sleep(5)
+        if _has_usable():
+            return None
+    return (
+        "面板代理池没有健康且启用的代理：已自动探活仍未恢复"
+        "（家宽出口可能临时故障），请稍后再试或更换代理"
+    )
+
+
 def _registration_env() -> dict[str, str]:
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
@@ -759,6 +810,9 @@ def _start_orch_unlocked():
     prerequisite_error = _runtime_prerequisite_error()
     if prerequisite_error:
         return {"ok": False, "error": prerequisite_error}
+    proxy_error = _ensure_healthy_proxies()
+    if proxy_error:
+        return {"ok": False, "error": proxy_error}
     c = load_control()
     now = cpa_count()
     add_count = c.get("add_count")
@@ -834,6 +888,9 @@ def _start_batch_only_unlocked():
     prerequisite_error = _runtime_prerequisite_error()
     if prerequisite_error:
         return {"ok": False, "error": prerequisite_error}
+    proxy_error = _ensure_healthy_proxies()
+    if proxy_error:
+        return {"ok": False, "error": proxy_error}
     c = load_control()
     workers = int(c.get("workers") or 3)
     count = int(c.get("batch_count") or 40)
@@ -936,6 +993,7 @@ def snapshot():
         "eta": eta,
         "traffic": traffic,
         "traffic_summary": traffic_summary,
+        "last_stop_reason": parsed.get("last_alert"),
         "blacklist": {
             "count": bl.get("count"),
             "asns": bl.get("asns"),
@@ -4057,9 +4115,18 @@ function render(d) {
     sync.textContent = "实时更新";
     sync.className = "badge";
   }
-  document.getElementById("ctrl-status").textContent = on ? "运行中" : "空闲";
+  const ctrlStatus = document.getElementById("ctrl-status");
+  ctrlStatus.textContent = on ? "运行中" : "空闲";
   document.getElementById("btn-start").disabled = on;
   document.getElementById("btn-stop").disabled = !on;
+  // 批次未运行时展示上次停止原因（预检失败/代理不可用等），停止不再「无声」
+  if (!on && d.last_stop_reason) {
+    ctrlStatus.textContent = "空闲 · 上次停止原因见提示";
+    ctrlStatus.title = d.last_stop_reason;
+    setMsg("ctrl-msg", "上次批次停止原因：" + d.last_stop_reason, "err");
+  } else if (on) {
+    ctrlStatus.removeAttribute("title");
+  }
   fillControl(d);
 
   const traffic = d.traffic || {};
